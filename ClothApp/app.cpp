@@ -88,7 +88,7 @@ static void initScene(); // Generate scene matrices
 // demos
 static void demo_hang(); // curtain hanging from top corners
 static void demo_drop(); // curtain dropping on sphere
-static void(*g_demo)() = demo_drop;
+static void(*g_demo)() = demo_hang;
 
 // glut callbacks
 static void display();

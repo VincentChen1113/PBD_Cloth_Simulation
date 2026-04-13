@@ -16,8 +16,9 @@ GLShader::~GLShader() {
 
 void GLShader::compile(const char* source) {
 	GLint compiled = 0;  // Compiled flag
+	const GLint sourceLen = static_cast<GLint>(std::strlen(source));
 	const char *ptrs[] = { source };
-	const GLint lens[] = { std::strlen(source) };
+	const GLint lens[] = { sourceLen };
 	glShaderSource(handle, 1, ptrs, lens);
 	glCompileShader(handle);
 	glGetShaderiv(handle, GL_COMPILE_STATUS, &compiled);
@@ -32,13 +33,23 @@ void GLShader::compile(const char* source) {
 }
 
 void GLShader::compile(std::ifstream& source) {
+	if (!source) {
+		throw std::runtime_error("Failed to read shader source.");
+	}
+
 	std::vector<char> text;
 	source.seekg(0, std::ios_base::end);
 	std::streampos fileSize = source.tellg();
-	text.resize(fileSize);
+	if (fileSize <= 0) {
+		throw std::runtime_error("Shader source is empty.");
+	}
+	text.resize(static_cast<size_t>(fileSize) + 1, '\0');
 
 	source.seekg(0, std::ios_base::beg);
 	source.read(&text[0], fileSize);
+	if (!source) {
+		throw std::runtime_error("Failed to read shader source.");
+	}
 	compile(&text[0]);
 }
 

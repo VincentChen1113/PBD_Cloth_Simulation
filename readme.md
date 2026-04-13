@@ -45,12 +45,6 @@ This section will demonstrate the new PBD-based cloth simulation system implemen
 
 *(To be added)*
 
-Examples you can include later:
-- Cloth dropping onto a sphere  
-- Cloth draping over different objects  
-- Comparison between low/high resolution cloth  
-- Side-by-side comparison with mass-spring solver  
-
 ---
 
 ## Dependencies

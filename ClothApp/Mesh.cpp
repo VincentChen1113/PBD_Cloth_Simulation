@@ -1,10 +1,10 @@
 #include "Mesh.h"
 
 // M E S H /////////////////////////////////////////////////////////////////////////////////////
-float* Mesh::vbuff() { return VERTEX_DATA(this); }
-float* Mesh::nbuff() { return NORMAL_DATA(this); }
-float* Mesh::tbuff() { return TEXTURE_DATA(this); }
-unsigned int* Mesh::ibuff() { return &_ibuff[0]; }
+float* Mesh::vbuff() { return VERTEX_DATA(this); }		// vertex buffer
+float* Mesh::nbuff() { return NORMAL_DATA(this); }		// normal buffer
+float* Mesh::tbuff() { return TEXTURE_DATA(this); }		// texture coordinate buffer
+unsigned int* Mesh::ibuff() { return &_ibuff[0]; }		// index buffer
 void Mesh::useIBuff(std::vector<unsigned int>& _ibuff) { this->_ibuff = _ibuff; }
 
 unsigned int Mesh::vbuffLen() { return (unsigned int)n_vertices() * 3; }

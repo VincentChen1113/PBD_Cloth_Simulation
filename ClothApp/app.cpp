@@ -185,16 +185,16 @@ static void initShaders() {
 
 static void initCloth() {
 	// short hand
-	const int n = SystemParam::n;
-	const float w = SystemParam::w;
+	const int n = SystemParam::n;		// cloth grid width -> n * n = n_vertices
+	const float w = SystemParam::w;		// cloth width -> rest length of structural springs r = w / (n - 1) 
 
 	// generate mesh
 	MeshBuilder meshBuilder;
-	meshBuilder.uniformGrid(w, n);
-	g_clothMesh = meshBuilder.getResult();
+	meshBuilder.uniformGrid(w, n);			// generate uniform grid mesh with width w and n vertices per side
+	g_clothMesh = meshBuilder.getResult();	// halfedge data structure
 
 	// fill program input
-	g_render_target = new ProgramInput;
+	g_render_target = new ProgramInput;		// vertex, normal, texutre, index check Shader.h for details
 	g_render_target->setPositionData(g_clothMesh->vbuff(), g_clothMesh->vbuffLen());
 	g_render_target->setNormalData(g_clothMesh->nbuff(), g_clothMesh->nbuffLen());
 	g_render_target->setTextureData(g_clothMesh->tbuff(), g_clothMesh->tbuffLen());

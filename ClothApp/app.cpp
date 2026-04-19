@@ -11,6 +11,7 @@
 #include "Mesh.h"
 #include "Renderer.h"
 #include "MassSpringSolver.h"
+#include "PBDSolver.h"
 #include "UserInteraction.h"
 
 // G L O B A L S ///////////////////////////////////////////////////////////////////
@@ -54,7 +55,19 @@ static const int g_animation_timer = (int) ((1.0f / g_fps) * 1000 - g_frame_time
 static mass_spring_system* g_system;
 static MassSpringSolver* g_solver;
 
-// System parameters
+// PBD System
+static pbd_system* g_pbdSystem;
+static PBDSolver* g_pbdSolver;
+
+// Solver selection
+// enum class SolverMode {
+//     MassSpring,
+//     PBD
+// };
+
+// static SolverMode g_solverMode = SolverMode::MassSpring; // default to mass-spring solver, switch to PBD later
+
+// System parameters for fast-mass-spring
 namespace SystemParam {
 	static const int n = 33; // must be odd, n * n = n_vertices | 61
 	static const float w = 2.0f; // width | 2.0f
@@ -66,8 +79,26 @@ namespace SystemParam {
 	static const float g = 9.8f * m; // gravitational force | 9.8f
 }
 
+// System parameters for PBD
+namespace PBDSystemParam {
+    static const int n = 33; // must be odd, n * n = n_vertices
+    static const float w = 2.0f; // cloth width
+    static const float h = 0.008f; // time step
+    static const float r = w / (n - 1); // rest length
+    static const float m = 0.25f / (n * n); // point mass
+    static const float g = 9.8f; // gravitational acceleration
+
+    static const int n_iter = 10; // solver iterations
+    static const float a = 0.01f; // damping factor
+    static const float eps = 1e-4f; // collision epsilon
+	static const float k_stretch = 1.0f;
+	static const float k_shear = 1.0f;
+	static const float k_bend = 0.2f;
+	static const float sphere_radius = 0.64f;
+}
+
 // Constraint Graph
-static CgRootNode* g_cgRootNode;
+static CgRootNode* g_cgRootNode;	// not required for pbd, but useful for fast-mass-spring demo
 
 // Scene parameters
 static const float g_camera_distance = 4.2f;
@@ -80,15 +111,49 @@ static glm::mat4 g_ProjectionMatrix;
 // state initialization
 static void initGlutState(int, char**);
 static void initGLState();
+static void parseSimMode(int, char**);
 
 static void initShaders(); // Read, compile and link shaders
 static void initCloth(); // Generate cloth mesh
 static void initScene(); // Generate scene matrices
+static void initMouseInteraction(CgPointFixNode*, unsigned int);
+static bool isPBDMode();
+static unsigned int activeGridSize();
+static float activeClothWidth();
+static pbd_system* buildPBDSystem(const mass_spring_system& system);
 
 // demos
-static void demo_hang(); // curtain hanging from top corners
-static void demo_drop(); // curtain dropping on sphere
+enum class SimMode {
+	MassSpringHang,
+	MassSpringDrop,
+	PBDHang,
+	PBDDrop
+};
+
+static SimMode g_mode = SimMode::MassSpringHang; // default to mass-spring hanging demo, switch to other demos later
+// demos
+static void demo_hang();
+static void demo_drop();
+static void demo_pbd_hang();
+static void demo_pbd_drop();
 static void(*g_demo)() = demo_hang;
+
+static void selectDemo() {
+	switch (g_mode) {
+	case SimMode::MassSpringHang:
+		g_demo = demo_hang;
+		break;
+	case SimMode::MassSpringDrop:
+		g_demo = demo_drop;
+		break;
+	case SimMode::PBDHang:
+		g_demo = demo_pbd_hang;
+		break;
+	case SimMode::PBDDrop:
+		g_demo = demo_pbd_drop;
+		break;
+	}
+}
 
 // glut callbacks
 static void display();
@@ -115,10 +180,12 @@ void checkGlErrors();
 // M A I N //////////////////////////////////////////////////////////////////////////
 int main(int argc, char** argv) {
 	try {
+		parseSimMode(argc, argv);
 		initGlutState(argc, argv);
 		glewInit();
 		initGLState();
 
+		selectDemo();
 		initShaders();
 		initCloth();
 		initScene();
@@ -137,6 +204,55 @@ int main(int argc, char** argv) {
 
 
 // S T A T E  I N I T I A L I Z A T O N /////////////////////////////////////////////
+static void parseSimMode(int argc, char** argv) {
+	if (argc <= 1) return;
+
+	const std::string arg1(argv[1]);
+	if (argc == 2) {
+		if (arg1 == "mass-spring-hang" || arg1 == "ms-hang") {
+			g_mode = SimMode::MassSpringHang;
+			return;
+		}
+		if (arg1 == "mass-spring-drop" || arg1 == "ms-drop") {
+			g_mode = SimMode::MassSpringDrop;
+			return;
+		}
+		if (arg1 == "pbd-hang") {
+			g_mode = SimMode::PBDHang;
+			return;
+		}
+		if (arg1 == "pbd-drop") {
+			g_mode = SimMode::PBDDrop;
+			return;
+		}
+	}
+
+	if (argc >= 3) {
+		const std::string solver(argv[1]);
+		const std::string scene(argv[2]);
+		if ((solver == "mass-spring" || solver == "ms") && scene == "hang") {
+			g_mode = SimMode::MassSpringHang;
+			return;
+		}
+		if ((solver == "mass-spring" || solver == "ms") && scene == "drop") {
+			g_mode = SimMode::MassSpringDrop;
+			return;
+		}
+		if (solver == "pbd" && scene == "hang") {
+			g_mode = SimMode::PBDHang;
+			return;
+		}
+		if (solver == "pbd" && scene == "drop") {
+			g_mode = SimMode::PBDDrop;
+			return;
+		}
+	}
+
+	throw std::runtime_error(
+		"Usage: ./fast-mass-spring [mass-spring|ms|pbd] [hang|drop] or ./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-drop]"
+	);
+}
+
 static void initGlutState(int argc, char** argv) {
 	glutInit(&argc, argv);
 	glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE | GLUT_DEPTH);
@@ -162,6 +278,18 @@ static void initGLState() {
 	checkGlErrors();
 }
 
+static bool isPBDMode() {
+	return g_mode == SimMode::PBDHang || g_mode == SimMode::PBDDrop;
+}
+
+static unsigned int activeGridSize() {
+	return isPBDMode() ? PBDSystemParam::n : SystemParam::n;
+}
+
+static float activeClothWidth() {
+	return isPBDMode() ? PBDSystemParam::w : SystemParam::w;
+}
+
 static void initShaders() {
 	GLShader basic_vert(GL_VERTEX_SHADER);
 	GLShader phong_frag(GL_FRAGMENT_SHADER);
@@ -184,9 +312,8 @@ static void initShaders() {
 }
 
 static void initCloth() {
-	// short hand
-	const int n = SystemParam::n;		// cloth grid width -> n * n = n_vertices
-	const float w = SystemParam::w;		// cloth width -> rest length of structural springs r = w / (n - 1) 
+	const unsigned int n = activeGridSize();
+	const float w = activeClothWidth();
 
 	// generate mesh
 	MeshBuilder meshBuilder;
@@ -212,8 +339,28 @@ static void initScene() {
 		glm::vec3(0.618, -0.786, 0.3f) * g_camera_distance,
 		glm::vec3(0.0f, 0.0f, -1.0f),
 		glm::vec3(0.0f, 0.0f, 1.0f)
-	) * glm::translate(glm::mat4(1), glm::vec3(0.0f, 0.0f, SystemParam::w / 4));
+	) * glm::translate(glm::mat4(1), glm::vec3(0.0f, 0.0f, activeClothWidth() / 4));
 	updateProjection();
+}
+
+static void initMouseInteraction(CgPointFixNode* mouseFixer, unsigned int n) {
+	g_pickRenderer = new Renderer();
+	g_pickRenderer->setProgram(g_pickShader);
+	g_pickRenderer->setProgramInput(g_render_target);
+	g_pickRenderer->setElementCount(g_clothMesh->ibuffLen());
+	g_pickShader->setTessFact(n);
+	UI = new GridMeshUI(g_pickRenderer, mouseFixer, g_clothMesh->vbuff(), n);
+}
+
+static pbd_system* buildPBDSystem(const mass_spring_system& system) {
+	pbd_system* pbdSystem = new pbd_system;
+	pbdSystem->n_points = system.n_points;
+	pbdSystem->n_constraints = system.n_springs;
+	pbdSystem->time_step = system.time_step;
+	pbdSystem->spring_list = system.spring_list;
+	pbdSystem->rest_lengths = system.rest_lengths;
+	pbdSystem->masses = system.masses;
+	return pbdSystem;
 }
 
 static void demo_hang() {
@@ -253,13 +400,8 @@ static void demo_hang() {
 	cornerFixer->fixPoint(n - 1);
 
 	// initialize user interaction
-	g_pickRenderer = new Renderer();
-	g_pickRenderer->setProgram(g_pickShader);
-	g_pickRenderer->setProgramInput(g_render_target);
-	g_pickRenderer->setElementCount(g_clothMesh->ibuffLen());
-	g_pickShader->setTessFact(SystemParam::n);
 	CgPointFixNode* mouseFixer = new CgPointFixNode(g_system, g_clothMesh->vbuff());
-	UI = new GridMeshUI(g_pickRenderer, mouseFixer, g_clothMesh->vbuff(), n);
+	initMouseInteraction(mouseFixer, n);
 
 	// build constraint graph
 	g_cgRootNode = new CgRootNode(g_system, g_clothMesh->vbuff());
@@ -312,13 +454,8 @@ static void demo_drop() {
 	deformationNode->addSprings(massSpringBuilder.getStructIndex());
 
 	// initialize user interaction
-	g_pickRenderer = new Renderer();
-	g_pickRenderer->setProgram(g_pickShader);
-	g_pickRenderer->setProgramInput(g_render_target);
-	g_pickRenderer->setElementCount(g_clothMesh->ibuffLen());
-	g_pickShader->setTessFact(SystemParam::n);
 	CgPointFixNode* mouseFixer = new CgPointFixNode(g_system, g_clothMesh->vbuff());
-	UI = new GridMeshUI(g_pickRenderer, mouseFixer, g_clothMesh->vbuff(), n);
+	initMouseInteraction(mouseFixer, n);
 
 	// build constraint graph
 	g_cgRootNode = new CgRootNode(g_system, g_clothMesh->vbuff());
@@ -331,6 +468,57 @@ static void demo_drop() {
 	deformationNode->addChild(mouseFixer);
 }
 
+
+static void demo_pbd_hang() {
+	const unsigned int n = PBDSystemParam::n;
+
+	MassSpringBuilder builder;
+	builder.uniformGrid(
+		PBDSystemParam::n,
+		PBDSystemParam::h,
+		PBDSystemParam::r,
+		1.0f,
+		PBDSystemParam::m,
+		PBDSystemParam::a,
+		PBDSystemParam::g
+	);
+
+	mass_spring_system* temp = builder.getResult();
+	g_pbdSystem = buildPBDSystem(*temp);
+	delete temp;
+	g_pbdSolver = new PBDSolver(g_pbdSystem, g_clothMesh->vbuff());
+	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), PBDSystemParam::k_stretch);
+	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
+	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDSystemParam::k_bend);
+	g_pbdSolver->pinPoint(0);
+	g_pbdSolver->pinPoint(n - 1);
+	UI = nullptr;
+	g_pickRenderer = nullptr;
+}
+
+static void demo_pbd_drop() {
+	MassSpringBuilder builder;
+	builder.uniformGrid(
+		PBDSystemParam::n,
+		PBDSystemParam::h,
+		PBDSystemParam::r,
+		1.0f,
+		PBDSystemParam::m,
+		PBDSystemParam::a,
+		PBDSystemParam::g
+	);
+
+	mass_spring_system* temp = builder.getResult();
+	g_pbdSystem = buildPBDSystem(*temp);
+	delete temp;
+	g_pbdSolver = new PBDSolver(g_pbdSystem, g_clothMesh->vbuff());
+	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), PBDSystemParam::k_stretch);
+	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
+	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDSystemParam::k_bend);
+	g_pbdSolver->addSphereCollider(Eigen::Vector3f(0.0f, 0.0f, -1.0f), PBDSystemParam::sphere_radius);
+	UI = nullptr;
+	g_pickRenderer = nullptr;
+}
 // G L U T  C A L L B A C K S //////////////////////////////////////////////////////
 static void display() {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -364,19 +552,19 @@ static void mouse(const int button, const int state, const int x, const int y) {
 
 	// TODO: move to UserInteraction class: add renderer member variable
 	// pick point
-	if (g_mouseLClickButton) {
+	if (g_mouseLClickButton && UI != nullptr) {
 		UI->setModelview(g_ModelViewMatrix);
 		UI->setProjection(g_ProjectionMatrix);
 		UI->grabPoint(g_mouseClickX, g_mouseClickY);
 	}
-	else UI->releasePoint();
+	else if (UI != nullptr) UI->releasePoint();
 }
 
 static void motion(const int x, const int y) {
 	const float dx = float(x - g_mouseClickX);
 	const float dy = float (-(g_windowHeight - y - 1 - g_mouseClickY));
 
-	if (g_mouseLClickButton) {
+	if (g_mouseLClickButton && UI != nullptr) {
 		//glm::vec3 ux(g_ModelViewMatrix * glm::vec4(1, 0, 0, 0));
 		//glm::vec3 uy(g_ModelViewMatrix * glm::vec4(0, 1, 0, 0));
 		glm::vec3 ux(0, 1, 0);
@@ -403,14 +591,16 @@ static void drawCloth() {
 }
 
 static void animateCloth(int value) {
+	if (isPBDMode()) {
+		g_pbdSolver->solve(PBDSystemParam::n_iter);
+	}
+	else {
+		g_solver->solve(g_iter);
+		g_solver->solve(g_iter);
 
-	// solve two time-steps
-	g_solver->solve(g_iter);
-	g_solver->solve(g_iter);
-
-	// fix points
-	CgSatisfyVisitor visitor;
-	visitor.satisfy(*g_cgRootNode);
+		CgSatisfyVisitor visitor;
+		visitor.satisfy(*g_cgRootNode);
+	}
 
 	// update normals
 	g_clothMesh->request_face_normals();
@@ -457,6 +647,8 @@ static void cleanUp() {
 	// delete mass-spring system
 	delete g_system;
 	delete g_solver;
+	delete g_pbdSystem;
+	delete g_pbdSolver;
 
 	// delete constraint graph
 	// TODO

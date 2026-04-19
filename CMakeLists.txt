@@ -5,6 +5,7 @@ project(fast-mass-spring)
 set(Sources
     ClothApp/app.cpp
     ClothApp/MassSpringSolver.cpp
+  ClothApp/PBDSolver.cpp
     ClothApp/Mesh.cpp
     ClothApp/Renderer.cpp
     ClothApp/Shader.cpp

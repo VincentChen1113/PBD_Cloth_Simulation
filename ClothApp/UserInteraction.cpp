@@ -3,7 +3,7 @@
 #include <iostream>
 #include <cmath>
 
-UserInteraction::UserInteraction(Renderer* renderer, CgPointFixNode* fixer, float* vbuff) 
+UserInteraction::UserInteraction(Renderer* renderer, FixedPointController* fixer, float* vbuff) 
 	: renderer(renderer), vbuff(vbuff), fixer(fixer), i(-1) {}
 
 void UserInteraction::setModelview(const glm::mat4& mv) { renderer->setModelview(mv); }
@@ -37,7 +37,7 @@ void UserInteraction::movePoint(vec3 v) {
 	fixer->fixPoint(i);
 }
 
-GridMeshUI::GridMeshUI(Renderer* renderer, CgPointFixNode* fixer, float* vbuff, unsigned int n)
+GridMeshUI::GridMeshUI(Renderer* renderer, FixedPointController* fixer, float* vbuff, unsigned int n)
 	: UserInteraction(renderer, fixer, vbuff), n(n) {}
 
 int GridMeshUI::colorToIndex(color c) const {

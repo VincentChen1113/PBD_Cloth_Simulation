@@ -112,6 +112,13 @@ public:
 // Constraint Graph
 class CgNodeVisitor; // Constraint graph node visitor
 
+class FixedPointController {
+public:
+	virtual ~FixedPointController() = default;
+	virtual void fixPoint(unsigned int i) = 0;
+	virtual void releasePoint(unsigned int i) = 0;
+};
+
 // Constraint graph node
 class CgNode {
 protected:
@@ -158,7 +165,7 @@ public:
 	virtual bool accept(CgNodeVisitor& visitor);
 };
 
-class CgPointFixNode : public CgPointNode {
+class CgPointFixNode : public CgPointNode, public FixedPointController {
 protected:
 	typedef Eigen::Vector3f Vector3f;
 	std::unordered_map<unsigned int, Vector3f> fix_map;

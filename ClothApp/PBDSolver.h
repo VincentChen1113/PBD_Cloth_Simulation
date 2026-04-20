@@ -43,7 +43,7 @@ struct pbd_system {
 // -----------------------------
 // PBD Solver
 // -----------------------------
-class PBDSolver {
+class PBDSolver : public FixedPointController {
 private:
 	typedef Eigen::Vector3f Vector3f;   // 3D vector type
 	typedef Eigen::VectorXf VectorXf;   // dynamic float vector type
@@ -98,6 +98,8 @@ public:
 
 	// setup helpers
 	void pinPoint(unsigned int i);
+	virtual void fixPoint(unsigned int i) override;
+	virtual void releasePoint(unsigned int i) override;
 	void addSphereCollider(const Vector3f& center, float radius);
 
 	// build constraint lists from builder indices

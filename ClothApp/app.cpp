@@ -116,7 +116,7 @@ static void parseSimMode(int, char**);
 static void initShaders(); // Read, compile and link shaders
 static void initCloth(); // Generate cloth mesh
 static void initScene(); // Generate scene matrices
-static void initMouseInteraction(CgPointFixNode*, unsigned int);
+static void initMouseInteraction(FixedPointController*, unsigned int);
 static bool isPBDMode();
 static unsigned int activeGridSize();
 static float activeClothWidth();
@@ -343,7 +343,7 @@ static void initScene() {
 	updateProjection();
 }
 
-static void initMouseInteraction(CgPointFixNode* mouseFixer, unsigned int n) {
+static void initMouseInteraction(FixedPointController* mouseFixer, unsigned int n) {
 	g_pickRenderer = new Renderer();
 	g_pickRenderer->setProgram(g_pickShader);
 	g_pickRenderer->setProgramInput(g_render_target);
@@ -492,11 +492,11 @@ static void demo_pbd_hang() {
 	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDSystemParam::k_bend);
 	g_pbdSolver->pinPoint(0);
 	g_pbdSolver->pinPoint(n - 1);
-	UI = nullptr;
-	g_pickRenderer = nullptr;
+	initMouseInteraction(g_pbdSolver, n);
 }
 
 static void demo_pbd_drop() {
+	const unsigned int n = PBDSystemParam::n;
 	MassSpringBuilder builder;
 	builder.uniformGrid(
 		PBDSystemParam::n,
@@ -516,8 +516,7 @@ static void demo_pbd_drop() {
 	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
 	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDSystemParam::k_bend);
 	g_pbdSolver->addSphereCollider(Eigen::Vector3f(0.0f, 0.0f, -1.0f), PBDSystemParam::sphere_radius);
-	UI = nullptr;
-	g_pickRenderer = nullptr;
+	initMouseInteraction(g_pbdSolver, n);
 }
 // G L U T  C A L L B A C K S //////////////////////////////////////////////////////
 static void display() {

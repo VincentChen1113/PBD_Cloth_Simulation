@@ -24,6 +24,7 @@ PBDSolver::PBDSolver(pbd_system* system, float* vbuff)
 
 void PBDSolver::initializeState() {
 	const unsigned int n = system->n_points;
+    // Sudo-code (1)~(3) Initialize particle state: x, p, v, w
 
     // resize state vectors to n elements
 	x.resize(n);
@@ -68,7 +69,7 @@ void PBDSolver::writeBackToVBuff() {
 
 void PBDSolver::applyExternalForces(float dt) {
 	const unsigned int n = system->n_points;
-
+    // Sudo-code (5) Apply external forces: v_i += dt * f_ext_i / m_i
     // apply gravity as external force for now
     // need further extension to support other types of forces (e.g. wind) and user interaction
 	for (unsigned int i = 0; i < n; ++i) {
@@ -154,6 +155,7 @@ void PBDSolver::predictPositions(float dt) {
 			continue;
 		}
 
+        // Sudo-code (7) Predict position: p_i = x_i + dt * v_i
 		p[i] = x[i] + dt * v[i];
 	}
 }
@@ -209,6 +211,7 @@ void PBDSolver::projectSphereCollisions() {
 }
 
 void PBDSolver::updateVelocities(float dt) {
+    // Sudo-code (16) Update velocities: v_i = (p_i - x_i) / dt
 	if (dt <= 0.0f) return;
 
 	const unsigned int n = system->n_points;
@@ -259,12 +262,47 @@ void PBDSolver::solve(unsigned int n) {
 void PBDSolver::pinPoint(unsigned int i) {
 	if (i >= x.size()) return;
 
-	for (const FixedPointConstraint& constraint : fixedConstraints) {
-		if (constraint.i == i) return;
+	for (FixedPointConstraint& constraint : fixedConstraints) {
+		if (constraint.i != i) continue;
+
+		constraint.fixedPosition = Vector3f(
+			vbuff[3 * i + 0],
+			vbuff[3 * i + 1],
+			vbuff[3 * i + 2]
+		);
+		x[i] = constraint.fixedPosition;
+		p[i] = constraint.fixedPosition;
+		v[i] = Vector3f(0.0f, 0.0f, 0.0f);
+		invMass[i] = 0.0f;
+		return;
 	}
 
 	invMass[i] = 0.0f;
-	fixedConstraints.push_back(FixedPointConstraint{ i, x[i] });
+	const Vector3f fixedPosition(
+		vbuff[3 * i + 0],
+		vbuff[3 * i + 1],
+		vbuff[3 * i + 2]
+	);
+	x[i] = fixedPosition;
+	p[i] = fixedPosition;
+	v[i] = Vector3f(0.0f, 0.0f, 0.0f);
+	fixedConstraints.push_back(FixedPointConstraint{ i, fixedPosition });
+}
+
+void PBDSolver::fixPoint(unsigned int i) {
+	pinPoint(i);
+}
+
+void PBDSolver::releasePoint(unsigned int i) {
+	if (i >= x.size()) return;
+
+	for (std::vector<FixedPointConstraint>::iterator it = fixedConstraints.begin(); it != fixedConstraints.end(); ++it) {
+		if (it->i != i) continue;
+		fixedConstraints.erase(it);
+		const float mass = system->masses[i];
+		invMass[i] = (mass > 0.0f) ? (1.0f / mass) : 0.0f;
+		return;
+	}
 }
 
 void PBDSolver::addSphereCollider(const Vector3f& center, float radius) {

@@ -11,12 +11,12 @@ protected:
 
 	int i; // index of fixed point
 	float* vbuff; // vertex buffer
-	CgPointFixNode* fixer; // point fixer
+	FixedPointController* fixer; // point fixer
 	Renderer* renderer; // pick shader renderer
 	virtual int colorToIndex(color c) const = 0;
 
 public:
-	UserInteraction(Renderer* renderer, CgPointFixNode* fixer, float* vbuff);
+	UserInteraction(Renderer* renderer, FixedPointController* fixer, float* vbuff);
 
 	void setModelview(const glm::mat4& mv);
 	void setProjection(const glm::mat4& p);
@@ -31,5 +31,5 @@ protected:
 	const unsigned int n; // grid width
 	virtual int colorToIndex(color c) const;
 public:
-	GridMeshUI(Renderer* renderer, CgPointFixNode* fixer, float* vbuff, unsigned int n);
+	GridMeshUI(Renderer* renderer, FixedPointController* fixer, float* vbuff, unsigned int n);
 };

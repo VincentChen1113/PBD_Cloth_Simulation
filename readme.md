@@ -66,6 +66,38 @@ cmake ..
 cmake --build .
 ```
 
+## Running
+
+Run the executable from the `build` directory so it can find the copied shader files:
+
+```bash
+cd build
+./fast-mass-spring
+```
+
+The executable supports both long-form and short-form mode selection:
+
+```bash
+./fast-mass-spring [mass-spring|ms|pbd] [hang|drop]
+```
+
+Or equivalently:
+
+```bash
+./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-drop]
+```
+
+Examples:
+
+```bash
+./fast-mass-spring mass-spring hang
+./fast-mass-spring ms drop
+./fast-mass-spring pbd hang
+./fast-mass-spring pbd-drop
+```
+
+If no arguments are provided, the program defaults to the mass-spring hanging cloth demo.
+
 On Windows, you will likely need to specify the directories containing GLUT and GLEW in CMAKE_PREFIX_PATH so that cmake can find them.
 
 ``` bash

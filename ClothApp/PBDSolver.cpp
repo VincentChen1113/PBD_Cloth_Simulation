@@ -420,6 +420,20 @@ void PBDSolver::step(float dt) {
 }
 
 void PBDSolver::solve(unsigned int n) {
+	// Wrapper used by the app to override the number of constraint-projection
+	// iterations for a single simulation time step.
+	//
+	// Important: n is NOT the number of outer time steps. This function still
+	// advances the simulation by exactly one dt via step(system->time_step).
+	// Instead, n temporarily replaces solverIterations, which controls the
+	// inner PBD loop inside step():
+	//   for each solver iteration:
+	//     project persistent constraints
+	//     project generated collision constraints
+	//
+	// After that one step is finished, the previous default iteration count is
+	// restored. This lets the caller choose the quality/cost of one frame update
+	// without permanently changing solver configuration.
 	const unsigned int previousIterations = solverIterations;
 	solverIterations = n;
 	step(system->time_step);

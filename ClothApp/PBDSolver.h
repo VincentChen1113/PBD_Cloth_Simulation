@@ -44,6 +44,7 @@ public:
 	std::size_t cardinality() const;
 	const std::vector<unsigned int>& indices() const;
 	float stiffness() const;
+	void setStiffness(float stiffness);
 	PBDConstraintType type() const;
 
 	// Evaluate the scalar constraint C(p).
@@ -224,6 +225,9 @@ private:
 	// Persistent constraints are part of the cloth model and exist every frame.
 	ConstraintList persistentConstraints;
 	std::unordered_map<unsigned int, FixedPointConstraint*> fixedPointConstraints;
+	std::vector<PBDConstraint*> structuralConstraints;
+	std::vector<PBDConstraint*> shearConstraints;
+	std::vector<PBDConstraint*> bendConstraints;
 
 	// Collision primitives persist, but actual collision constraints are generated
 	// fresh each step from the predicted positions x -> p.
@@ -235,6 +239,9 @@ private:
 	unsigned int solverIterations;
 	float dampingFactor;
 	float collisionEps;
+	float structuralStiffness;
+	float shearStiffness;
+	float bendStiffness;
 	float selfCollisionThickness;
 	float selfCollisionStiffness;
 	float selfCollisionCellSize;
@@ -252,11 +259,16 @@ private:
 	void generateCollisionConstraints();
 	void generateSelfCollisionConstraints();
 	void projectConstraints(const ConstraintList& constraints);
+	void setConstraintGroupStiffness(const std::vector<PBDConstraint*>& constraints, float stiffness);
 
 	void updateVelocities(float dt);
 	void commitPositions();
 
-	void addDistanceConstraints(const std::vector<unsigned int>& indices, float stiffness);
+	void addDistanceConstraints(
+		const std::vector<unsigned int>& indices,
+		float stiffness,
+		std::vector<PBDConstraint*>* constraintGroup = nullptr
+	);
 	void addDihedralBendConstraints(float stiffness);
 
 public:
@@ -273,11 +285,28 @@ public:
 	virtual void fixPoint(unsigned int i) override;
 	virtual void releasePoint(unsigned int i) override;
 	void addSphereCollider(const Vector3f& center, float radius);
+	void setGravity(float gravityMagnitude);
+	float getGravity() const;
+	void setDampingFactor(float damping);
+	float getDampingFactor() const;
+	void setSolverIterations(unsigned int iterations);
+	unsigned int getSolverIterations() const;
 	void setSelfCollisionThickness(float thickness) {
 		if (thickness <= 0.0f) return;
 		selfCollisionThickness = std::max(thickness, collisionEps);
 		selfCollisionCellSize = selfCollisionThickness;
 	}
+	void setStructuralStiffness(float stiffness);
+	float getStructuralStiffness() const;
+	void setShearStiffness(float stiffness);
+	float getShearStiffness() const;
+	void setBendStiffness(float stiffness);
+	float getBendStiffness() const;
+	void setSelfCollisionStiffness(float stiffness);
+	float getSelfCollisionStiffness() const;
+	float getSelfCollisionThickness() const;
+	void setMaxSelfCollisionContactsPerVertex(unsigned int maxContacts);
+	unsigned int getMaxSelfCollisionContactsPerVertex() const;
 
 	// build constraint lists from builder indices
 	void addStructuralConstraints(const std::vector<unsigned int>& indices, float stiffness = 1.0f);

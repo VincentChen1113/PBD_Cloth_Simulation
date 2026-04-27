@@ -194,6 +194,10 @@ float PBDConstraint::stiffness() const {
 	return stiffnessValue;
 }
 
+void PBDConstraint::setStiffness(float stiffness) {
+	stiffnessValue = std::max(0.0f, std::min(1.0f, stiffness));
+}
+
 PBDConstraintType PBDConstraint::type() const {
 	return constraintType;
 }

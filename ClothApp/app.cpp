@@ -93,7 +93,7 @@ namespace PBDSystemParam {
     static const float eps = 1e-4f; // collision epsilon
 	static const float k_stretch = 1.0f;
 	static const float k_shear = 1.0f;
-	static const float k_bend = 0.2f;
+	static const float k_bend = 0.05f;
 	static const float sphere_radius = 0.64f;
 }
 
@@ -360,6 +360,12 @@ static pbd_system* buildPBDSystem(const mass_spring_system& system) {
 	pbdSystem->spring_list = system.spring_list;
 	pbdSystem->rest_lengths = system.rest_lengths;
 	pbdSystem->masses = system.masses;
+	if (g_clothMesh != nullptr) {
+		pbdSystem->triangle_indices.assign(
+			g_clothMesh->ibuff(),
+			g_clothMesh->ibuff() + g_clothMesh->ibuffLen()
+		);
+	}
 	return pbdSystem;
 }
 
@@ -483,6 +489,7 @@ static void demo_pbd_hang() {
 		PBDSystemParam::g
 	);
 
+	// build PBD system from mass-spring system, then initialize PBD solver and constraints
 	mass_spring_system* temp = builder.getResult();
 	g_pbdSystem = buildPBDSystem(*temp);
 	delete temp;
@@ -508,6 +515,7 @@ static void demo_pbd_drop() {
 		PBDSystemParam::g
 	);
 
+	// build PBD system from mass-spring system, then initialize PBD solver and constraints
 	mass_spring_system* temp = builder.getResult();
 	g_pbdSystem = buildPBDSystem(*temp);
 	delete temp;

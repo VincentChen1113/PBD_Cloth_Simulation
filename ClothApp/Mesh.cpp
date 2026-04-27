@@ -35,7 +35,7 @@ void MeshBuilder::uniformGrid(float w, int n) {
 
 	for (int i = 0; i < n; i++) {
 		for (int j = 0; j < n; j++) {
-			handle_table[j + i * n] = result->add_vertex(o + d*j*ux + d*i*uy); // add vertex
+			handle_table[j + i * n] = result->add_vertex(o + d*j*ux + d*i*uy); // add vertex, vertexId(i, j) = i * n + j
 			result->set_texcoord2D(handle_table[j + i * n], OpenMesh::Vec2f(ud*j, ud*i)); // add texture coordinates
 
 			//add connectivity

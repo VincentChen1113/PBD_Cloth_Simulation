@@ -84,6 +84,34 @@ public:
 	) const override;
 };
 
+// Dihedral bending constraint:
+//   C_bend = theta - theta_0
+// where theta is the dihedral angle between the two triangles incident to a
+// shared cloth edge. Unlike a distance-based bend proxy, this directly
+// measures folding and is therefore much less coupled to stretching.
+class DihedralBendConstraint : public PBDConstraint {
+private:
+	float restAngle;
+
+public:
+	DihedralBendConstraint(
+		unsigned int edge0,
+		unsigned int edge1,
+		unsigned int opposite0,
+		unsigned int opposite1,
+		float restAngle,
+		float stiffness
+	);
+
+	float angle(const std::vector<Vector3f>& positions, bool* valid = nullptr) const;
+
+	virtual float evaluate(const std::vector<Vector3f>& positions) const override;
+	virtual void gradients(
+		const std::vector<Vector3f>& positions,
+		std::vector<Vector3f>& outGradients
+	) const override;
+};
+
 // Fixed point constraint:
 //   C(p_i) = p_i - p_fixed
 // This is vector-valued in full generality, so for a practical cloth solver we
@@ -148,6 +176,7 @@ struct pbd_system {
 	EdgeList spring_list;
 	Eigen::VectorXf rest_lengths;
 	Eigen::VectorXf masses;
+	std::vector<unsigned int> triangle_indices;
 };
 
 // -----------------------------
@@ -199,6 +228,7 @@ private:
 	void commitPositions();
 
 	void addDistanceConstraints(const std::vector<unsigned int>& indices, float stiffness);
+	void addDihedralBendConstraints(float stiffness);
 
 public:
 	PBDSolver(pbd_system* system, float* vbuff);

@@ -93,7 +93,7 @@ Examples:
 ./fast-mass-spring mass-spring hang
 ./fast-mass-spring ms drop
 ./fast-mass-spring pbd hang
-./fast-mass-spring pbd-drop
+./fast-mass-spring pbd drop
 ```
 
 If no arguments are provided, the program defaults to the mass-spring hanging cloth demo.

@@ -1,8 +1,10 @@
 #pragma once
 #include "MassSpringSolver.h"
 #include <Eigen/Dense>
+#include <array>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // -----------------------------
@@ -144,16 +146,36 @@ struct SphereCollider {
 	float radius;
 };
 
-// Sphere collision constraint:
-//   C(p_i) = |p_i - c| - r
-// This is an inequality constraint and is satisfied when C >= 0.
+// Generated collision constraint:
+// - sphere contact:          C(p_i) = |p_i - c| - r
+// - self vertex-triangle:    C(q, p1, p2, p3) = (q - p1) . n - h
+// Both are inequality constraints and are satisfied when C >= 0.
 class SphereCollisionConstraint : public PBDConstraint {
 private:
+	enum class CollisionKind {
+		Sphere,
+		SelfVertexTriangle
+	};
+
+	CollisionKind collisionKind;
 	Eigen::Vector3f center;
 	float radius;
+	float offset;
+	Eigen::Vector3f selfCollisionNormal;
+	Eigen::Vector3f selfCollisionBarycentric;
 
 public:
 	SphereCollisionConstraint(unsigned int i, const Eigen::Vector3f& center, float radius, float stiffness = 1.0f);
+	SphereCollisionConstraint(
+		unsigned int vertex,
+		unsigned int p1,
+		unsigned int p2,
+		unsigned int p3,
+		float thickness,
+		const Eigen::Vector3f& normal,
+		const Eigen::Vector3f& barycentric,
+		float stiffness = 1.0f
+	);
 
 	virtual float evaluate(const std::vector<Vector3f>& positions) const override;
 	virtual void gradients(
@@ -207,11 +229,17 @@ private:
 	// fresh each step from the predicted positions x -> p.
 	std::vector<SphereCollider> sphereColliders;
 	ConstraintList generatedCollisionConstraints;
+	std::vector<std::unordered_set<unsigned int>> meshAdjacency;
 
 	// simulation parameters
 	unsigned int solverIterations;
 	float dampingFactor;
 	float collisionEps;
+	float selfCollisionThickness;
+	float selfCollisionStiffness;
+	float selfCollisionCellSize;
+	unsigned int maxSelfCollisionContactsPerVertex;
+	float velocitySleepThreshold;
 	Vector3f gravity;
 
 	// internal steps
@@ -222,6 +250,7 @@ private:
 	void dampVelocities();
 	void predictPositions(float dt);
 	void generateCollisionConstraints();
+	void generateSelfCollisionConstraints();
 	void projectConstraints(const ConstraintList& constraints);
 
 	void updateVelocities(float dt);
@@ -244,6 +273,11 @@ public:
 	virtual void fixPoint(unsigned int i) override;
 	virtual void releasePoint(unsigned int i) override;
 	void addSphereCollider(const Vector3f& center, float radius);
+	void setSelfCollisionThickness(float thickness) {
+		if (thickness <= 0.0f) return;
+		selfCollisionThickness = std::max(thickness, collisionEps);
+		selfCollisionCellSize = selfCollisionThickness;
+	}
 
 	// build constraint lists from builder indices
 	void addStructuralConstraints(const std::vector<unsigned int>& indices, float stiffness = 1.0f);

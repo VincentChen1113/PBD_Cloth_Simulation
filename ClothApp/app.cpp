@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <string>
+#include <sstream>
 #include <vector>
 
 #include "Shader.h"
@@ -58,6 +59,7 @@ static MassSpringSolver* g_solver;
 // PBD System
 static pbd_system* g_pbdSystem;
 static PBDSolver* g_pbdSolver;
+static float g_selfCollisionThicknessOverride = -1.0f;
 
 // Solver selection
 // enum class SolverMode {
@@ -112,6 +114,7 @@ static glm::mat4 g_ProjectionMatrix;
 static void initGlutState(int, char**);
 static void initGLState();
 static void parseSimMode(int, char**);
+static void parseOptionalArgs(int argc, char** argv, int startIndex);
 
 static void initShaders(); // Read, compile and link shaders
 static void initCloth(); // Generate cloth mesh
@@ -211,18 +214,22 @@ static void parseSimMode(int argc, char** argv) {
 	if (argc == 2) {
 		if (arg1 == "mass-spring-hang" || arg1 == "ms-hang") {
 			g_mode = SimMode::MassSpringHang;
+			parseOptionalArgs(argc, argv, 2);
 			return;
 		}
 		if (arg1 == "mass-spring-drop" || arg1 == "ms-drop") {
 			g_mode = SimMode::MassSpringDrop;
+			parseOptionalArgs(argc, argv, 2);
 			return;
 		}
 		if (arg1 == "pbd-hang") {
 			g_mode = SimMode::PBDHang;
+			parseOptionalArgs(argc, argv, 2);
 			return;
 		}
 		if (arg1 == "pbd-drop") {
 			g_mode = SimMode::PBDDrop;
+			parseOptionalArgs(argc, argv, 2);
 			return;
 		}
 	}
@@ -232,25 +239,52 @@ static void parseSimMode(int argc, char** argv) {
 		const std::string scene(argv[2]);
 		if ((solver == "mass-spring" || solver == "ms") && scene == "hang") {
 			g_mode = SimMode::MassSpringHang;
+			parseOptionalArgs(argc, argv, 3);
 			return;
 		}
 		if ((solver == "mass-spring" || solver == "ms") && scene == "drop") {
 			g_mode = SimMode::MassSpringDrop;
+			parseOptionalArgs(argc, argv, 3);
 			return;
 		}
 		if (solver == "pbd" && scene == "hang") {
 			g_mode = SimMode::PBDHang;
+			parseOptionalArgs(argc, argv, 3);
 			return;
 		}
 		if (solver == "pbd" && scene == "drop") {
 			g_mode = SimMode::PBDDrop;
+			parseOptionalArgs(argc, argv, 3);
 			return;
 		}
 	}
 
 	throw std::runtime_error(
-		"Usage: ./fast-mass-spring [mass-spring|ms|pbd] [hang|drop] or ./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-drop]"
+		"Usage: ./fast-mass-spring [mass-spring|ms|pbd] [hang|drop] [--self-thickness value] or ./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-drop] [--self-thickness value]"
 	);
+}
+
+static void parseOptionalArgs(int argc, char** argv, int startIndex) {
+	for (int i = startIndex; i < argc; ++i) {
+		const std::string arg(argv[i]);
+		if (arg == "--self-thickness") {
+			if (i + 1 >= argc) {
+				throw std::runtime_error("Missing value after --self-thickness");
+			}
+
+			std::stringstream valueStream(argv[++i]);
+			float thickness = -1.0f;
+			valueStream >> thickness;
+			if (!valueStream || !valueStream.eof() || thickness <= 0.0f) {
+				throw std::runtime_error("--self-thickness expects a positive float value");
+			}
+
+			g_selfCollisionThicknessOverride = thickness;
+			continue;
+		}
+
+		throw std::runtime_error("Unknown argument: " + arg);
+	}
 }
 
 static void initGlutState(int argc, char** argv) {
@@ -494,6 +528,9 @@ static void demo_pbd_hang() {
 	g_pbdSystem = buildPBDSystem(*temp);
 	delete temp;
 	g_pbdSolver = new PBDSolver(g_pbdSystem, g_clothMesh->vbuff());
+	if (g_selfCollisionThicknessOverride > 0.0f) {
+		g_pbdSolver->setSelfCollisionThickness(g_selfCollisionThicknessOverride);
+	}
 	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), PBDSystemParam::k_stretch);
 	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
 	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDSystemParam::k_bend);
@@ -520,6 +557,9 @@ static void demo_pbd_drop() {
 	g_pbdSystem = buildPBDSystem(*temp);
 	delete temp;
 	g_pbdSolver = new PBDSolver(g_pbdSystem, g_clothMesh->vbuff());
+	if (g_selfCollisionThicknessOverride > 0.0f) {
+		g_pbdSolver->setSelfCollisionThickness(g_selfCollisionThicknessOverride);
+	}
 	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), PBDSystemParam::k_stretch);
 	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
 	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDSystemParam::k_bend);

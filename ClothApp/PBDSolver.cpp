@@ -4,13 +4,18 @@
 #include <cassert>
 #include <cstdint>
 #include <cmath>
+#include <limits>
+#include <unordered_set>
 
 namespace PBDDefaultParam {
 	static const unsigned int solverIterations = 10;
 	static const float dampingFactor = 0.01f;
 	static const float collisionEps = 1e-4f;
 	static const float collisionStiffness = 1.0f;
-	static const Eigen::Vector3f gravity(0.0f, 0.0f, -9.8f);
+	static const float selfCollisionStiffness = 0.2f;
+	static const unsigned int maxSelfCollisionContactsPerVertex = 2u;
+	static const float velocitySleepThreshold = 2e-3f;
+	static const Eigen::Vector3f gravity(0.0f, 0.0f, -9.81f);
 }
 
 namespace {
@@ -45,6 +50,79 @@ struct PendingTriangleEdge {
 	unsigned int edge1;
 	unsigned int opposite;
 };
+
+struct SpatialHashKey {
+	int x;
+	int y;
+	int z;
+
+	bool operator==(const SpatialHashKey& other) const {
+		return x == other.x && y == other.y && z == other.z;
+	}
+};
+
+struct SpatialHashKeyHash {
+	std::size_t operator()(const SpatialHashKey& key) const {
+		const std::size_t hx = std::hash<int>{}(key.x);
+		const std::size_t hy = std::hash<int>{}(key.y);
+		const std::size_t hz = std::hash<int>{}(key.z);
+		return hx ^ (hy << 1) ^ (hz << 2);
+	}
+};
+
+SpatialHashKey hashPosition(const Eigen::Vector3f& position, float cellSize) {
+	assert(cellSize > 0.0f);
+	return SpatialHashKey{
+		static_cast<int>(std::floor(position.x() / cellSize)),
+		static_cast<int>(std::floor(position.y() / cellSize)),
+		static_cast<int>(std::floor(position.z() / cellSize))
+	};
+}
+
+bool barycentricCoordinates(
+	const Eigen::Vector3f& point,
+	const Eigen::Vector3f& a,
+	const Eigen::Vector3f& b,
+	const Eigen::Vector3f& c,
+	Eigen::Vector3f& barycentric
+) {
+	const Eigen::Vector3f v0 = b - a;
+	const Eigen::Vector3f v1 = c - a;
+	const Eigen::Vector3f v2 = point - a;
+
+	const float d00 = v0.dot(v0);
+	const float d01 = v0.dot(v1);
+	const float d11 = v1.dot(v1);
+	const float d20 = v2.dot(v0);
+	const float d21 = v2.dot(v1);
+	const float denominator = d00 * d11 - d01 * d01;
+	if (std::abs(denominator) <= 1e-8f) {
+		return false;
+	}
+
+	const float w1 = (d11 * d20 - d01 * d21) / denominator;
+	const float w2 = (d00 * d21 - d01 * d20) / denominator;
+	const float w0 = 1.0f - w1 - w2;
+	barycentric = Eigen::Vector3f(w0, w1, w2);
+	return true;
+}
+
+bool pointProjectsInsideTriangle(
+	const Eigen::Vector3f& point,
+	const Eigen::Vector3f& a,
+	const Eigen::Vector3f& b,
+	const Eigen::Vector3f& c,
+	Eigen::Vector3f& barycentric
+) {
+	if (!barycentricCoordinates(point, a, b, c, barycentric)) {
+		return false;
+	}
+
+	const float tolerance = -1e-4f;
+	return barycentric.x() >= tolerance
+		&& barycentric.y() >= tolerance
+		&& barycentric.z() >= tolerance;
+}
 
 float dihedralAngleFromPositions(
 	/*
@@ -294,8 +372,8 @@ void DihedralBendConstraint::gradients(
 
 	// C = acos(d) - theta_0, so by the chain rule:
 	//   grad C = -grad d / sqrt(1 - d^2)
-	// The denominator becomes singular near perfectly flat or fully folded
-	// states, so clamp it away from zero for robustness.
+	// The denominator becomes singular near perfectly flat or fully folded states, 
+	// so clamp it away from zero for robustness (avoid division by zero when d = +1 or d = -1).
 	const float sinTheta = std::sqrt(std::max(1.0f - d * d, eps));
 
 	// These q-vectors are the analytic gradients of d = cos(theta) with respect
@@ -377,30 +455,80 @@ SphereCollisionConstraint::SphereCollisionConstraint(
 	float stiffness
 )
 	: PBDConstraint(std::vector<unsigned int>{ i }, stiffness, PBDConstraintType::Inequality),
+	  collisionKind(CollisionKind::Sphere),
 	  center(center),
-	  radius(radius) {}
+	  radius(radius),
+	  offset(0.0f),
+	  selfCollisionNormal(Eigen::Vector3f::Zero()),
+	  selfCollisionBarycentric(Eigen::Vector3f::Zero()) {}
+
+SphereCollisionConstraint::SphereCollisionConstraint(
+	unsigned int vertex,
+	unsigned int p1,
+	unsigned int p2,
+	unsigned int p3,
+	float thickness,
+	const Eigen::Vector3f& normal,
+	const Eigen::Vector3f& barycentric,
+	float stiffness
+)
+	: PBDConstraint(
+		std::vector<unsigned int>{ vertex, p1, p2, p3 },
+		stiffness,
+		PBDConstraintType::Inequality
+	),
+	  collisionKind(CollisionKind::SelfVertexTriangle),
+	  center(Eigen::Vector3f::Zero()),
+	  radius(0.0f),
+	  offset(thickness),
+	  selfCollisionNormal(normal),
+	  selfCollisionBarycentric(barycentric) {}
 
 float SphereCollisionConstraint::evaluate(const std::vector<Vector3f>& positions) const {
-	// Collision inequality:
-	//   C(p_i) = |p_i - c| - r >= 0
-	return (positions[particleIndices[0]] - center).norm() - radius;
+	if (collisionKind == CollisionKind::Sphere) {
+		// Collision inequality:
+		//   C(p_i) = |p_i - c| - r >= 0
+		return (positions[particleIndices[0]] - center).norm() - radius;
+	}
+
+	if (particleIndices.size() != 4) return 0.0f;
+
+	const Vector3f& q = positions[particleIndices[0]];
+	const Vector3f& p1 = positions[particleIndices[1]];
+
+	// Self-collision inequality from Muller et al. 2007, Sec. 4.3:
+	//   C(q, p1, p2, p3) = (q - p1) . n - h >= 0
+	return (q - p1).dot(selfCollisionNormal) - offset;
 }
 
 void SphereCollisionConstraint::gradients(
 	const std::vector<Vector3f>& positions,
 	std::vector<Vector3f>& outGradients
 ) const {
-	outGradients.assign(1, Vector3f::Zero());
-	Vector3f delta = positions[particleIndices[0]] - center;
-	const float length = delta.norm();
+	if (collisionKind == CollisionKind::Sphere) {
+		outGradients.assign(1, Vector3f::Zero());
+		Vector3f delta = positions[particleIndices[0]] - center;
+		const float length = delta.norm();
 
-	if (length <= 1e-8f) {
-		outGradients[0] = Vector3f(0.0f, 0.0f, 1.0f);
+		if (length <= 1e-8f) {
+			outGradients[0] = Vector3f(0.0f, 0.0f, 1.0f);
+			return;
+		}
+
+		// grad_{p_i} C = (p_i - c) / |p_i - c|
+		outGradients[0] = delta / length;
 		return;
 	}
 
-	// grad_{p_i} C = (p_i - c) / |p_i - c|
-	outGradients[0] = delta / length;
+	outGradients.assign(4, Vector3f::Zero());
+	if (particleIndices.size() != 4) return;
+
+	// Using barycentric weights for the triangle vertices reproduces the paper's
+	// point-triangle correction split inside the generic PBD projection rule.
+	outGradients[0] = selfCollisionNormal;
+	outGradients[1] = -selfCollisionBarycentric[0] * selfCollisionNormal;
+	outGradients[2] = -selfCollisionBarycentric[1] * selfCollisionNormal;
+	outGradients[3] = -selfCollisionBarycentric[2] * selfCollisionNormal;
 }
 
 PBDSolver::PBDSolver(pbd_system* system, float* vbuff)
@@ -408,11 +536,50 @@ PBDSolver::PBDSolver(pbd_system* system, float* vbuff)
 	  solverIterations(PBDDefaultParam::solverIterations),
 	  dampingFactor(PBDDefaultParam::dampingFactor),
 	  collisionEps(PBDDefaultParam::collisionEps),
+	  structuralStiffness(1.0f),
+	  shearStiffness(1.0f),
+	  bendStiffness(1.0f),
+	  selfCollisionThickness(PBDDefaultParam::collisionEps),
+	  selfCollisionStiffness(PBDDefaultParam::selfCollisionStiffness),
+	  selfCollisionCellSize(PBDDefaultParam::collisionEps),
+	  maxSelfCollisionContactsPerVertex(PBDDefaultParam::maxSelfCollisionContactsPerVertex),
+	  velocitySleepThreshold(PBDDefaultParam::velocitySleepThreshold),
 	  gravity(PBDDefaultParam::gravity) {
 	assert(system != nullptr);
 	assert(vbuff != nullptr);
 
 	initializeState();
+	meshAdjacency.resize(system->n_points);
+	for (const Edge& edge : system->spring_list) {
+		if (edge.first >= meshAdjacency.size() || edge.second >= meshAdjacency.size()) continue;
+		meshAdjacency[edge.first].insert(edge.second);
+		meshAdjacency[edge.second].insert(edge.first);
+	}
+
+	float minRestLength = std::numeric_limits<float>::max();
+	for (int i = 0; i < system->rest_lengths.size(); ++i) {
+		const float restLength = system->rest_lengths[i];
+		if (restLength > 1e-6f) {
+			minRestLength = std::min(minRestLength, restLength);
+		}
+	}
+
+	if (minRestLength < std::numeric_limits<float>::max()) {
+		// Self-collision should model a thin cloth thickness, not half an edge
+		// length. Large thickness inflates folded cloth and causes false
+		// repulsion between nearby layers.
+		selfCollisionThickness = std::max(0.02f * minRestLength, collisionEps);
+		selfCollisionCellSize = selfCollisionThickness;
+	}
+}
+
+void PBDSolver::setConstraintGroupStiffness(const std::vector<PBDConstraint*>& constraints, float stiffness) {
+	const float clamped = std::max(0.0f, std::min(1.0f, stiffness));
+	for (PBDConstraint* constraint : constraints) {
+		if (constraint != nullptr) {
+			constraint->setStiffness(clamped);
+		}
+	}
 }
 
 void PBDSolver::initializeState() {
@@ -468,63 +635,12 @@ void PBDSolver::dampVelocities() {
 	const unsigned int n = system->n_points;
 	if (n == 0) return;
 
-	// (1) Compute total mass and center of mass position:
-	//     x_cm = (sum_i x_i m_i) / (sum_i m_i)
-	float totalMass = 0.0f;
-	Vector3f xcm(0.0f, 0.0f, 0.0f);
-
+	// Use strictly dissipative damping so residual cloth motion decays instead
+	// of preserving rigid-body modes indefinitely.
+	const float factor = std::max(0.0f, 1.0f - dampingFactor);
 	for (unsigned int i = 0; i < n; ++i) {
-		const float mass = system->masses[i];
-		totalMass += mass;
-		xcm += mass * x[i];
-	}
-
-	if (totalMass <= 0.0f) return;
-	xcm /= totalMass;
-
-	// (2) Compute center of mass velocity:
-	//     v_cm = (sum_i v_i m_i) / (sum_i m_i)
-	Vector3f vcm(0.0f, 0.0f, 0.0f);
-	for (unsigned int i = 0; i < n; ++i) {
-		const float mass = system->masses[i];
-		vcm += mass * v[i];
-	}
-	vcm /= totalMass;
-
-	// (3) Compute angular momentum:
-	//     L = sum_i r_i x (m_i v_i), where r_i = x_i - x_cm
-	Vector3f angularMomentum(0.0f, 0.0f, 0.0f);
-
-	// (4) Compute inertia tensor:
-	//     I = sum_i m_i (|r_i|^2 E - r_i r_i^T)
-	Eigen::Matrix3f inertia = Eigen::Matrix3f::Zero();
-
-	for (unsigned int i = 0; i < n; ++i) {
-		const float mass = system->masses[i];
-		const Vector3f r = x[i] - xcm;
-
-		angularMomentum += r.cross(mass * v[i]);
-
-		const float r2 = r.squaredNorm();
-		inertia += mass * (r2 * Eigen::Matrix3f::Identity() - r * r.transpose());
-	}
-
-	// (5) Compute angular velocity:
-	//     omega = I^{-1} L
-	Vector3f omega(0.0f, 0.0f, 0.0f);
-	if (std::abs(inertia.determinant()) > 1e-8f) {
-		omega = inertia.inverse() * angularMomentum;
-	}
-
-	// (6)-(8) For each vertex:
-	//     delta_v_i = v_cm + omega x r_i - v_i
-	//     v_i <- v_i + k_damping * delta_v_i
-	for (unsigned int i = 0; i < n; ++i) {
-		if (invMass[i] == 0.0f) continue; // keep fixed particles unchanged
-
-		const Vector3f r = x[i] - xcm;
-		const Vector3f targetVelocity = vcm + omega.cross(r);
-		v[i] += dampingFactor * (targetVelocity - v[i]);
+		if (invMass[i] == 0.0f) continue;
+		v[i] *= factor;
 	}
 }
 
@@ -565,6 +681,128 @@ void PBDSolver::generateCollisionConstraints() {
 			);
 		}
 	}
+
+	generateSelfCollisionConstraints();
+}
+
+void PBDSolver::generateSelfCollisionConstraints() {
+	if (system->triangle_indices.size() < 3 || selfCollisionCellSize <= 0.0f) return;
+
+	std::unordered_map<SpatialHashKey, std::vector<unsigned int>, SpatialHashKeyHash> verticesByCell;
+	verticesByCell.reserve(p.size());
+	std::vector<unsigned int> contactsPerVertex(system->n_points, 0u);
+
+	for (unsigned int vertex = 0; vertex < p.size(); ++vertex) {
+		verticesByCell[hashPosition(p[vertex], selfCollisionCellSize)].push_back(vertex);
+	}
+
+	for (std::size_t triangle = 0; triangle + 2 < system->triangle_indices.size(); triangle += 3) {
+		const unsigned int p1Index = system->triangle_indices[triangle + 0];
+		const unsigned int p2Index = system->triangle_indices[triangle + 1];
+		const unsigned int p3Index = system->triangle_indices[triangle + 2];
+
+		const Vector3f& p1 = p[p1Index];
+		const Vector3f& p2 = p[p2Index];
+		const Vector3f& p3 = p[p3Index];
+
+		Vector3f currentNormal = (p2 - p1).cross(p3 - p1);
+		const float currentNormalLength = currentNormal.norm();
+		if (currentNormalLength <= 1e-8f) continue;
+		currentNormal /= currentNormalLength;
+
+		const Vector3f minCorner = p1.cwiseMin(p2).cwiseMin(p3)
+			- Vector3f::Constant(selfCollisionThickness);
+		const Vector3f maxCorner = p1.cwiseMax(p2).cwiseMax(p3)
+			+ Vector3f::Constant(selfCollisionThickness);
+
+		const SpatialHashKey minCell = hashPosition(minCorner, selfCollisionCellSize);
+		const SpatialHashKey maxCell = hashPosition(maxCorner, selfCollisionCellSize);
+		std::unordered_set<unsigned int> processedVertices;
+
+		for (int cellX = minCell.x; cellX <= maxCell.x; ++cellX) {
+			for (int cellY = minCell.y; cellY <= maxCell.y; ++cellY) {
+				for (int cellZ = minCell.z; cellZ <= maxCell.z; ++cellZ) {
+					const SpatialHashKey cellKey{ cellX, cellY, cellZ };
+					auto cellVertices = verticesByCell.find(cellKey);
+					if (cellVertices == verticesByCell.end()) continue;
+
+					for (unsigned int vertexIndex : cellVertices->second) {
+						if (!processedVertices.insert(vertexIndex).second) continue;
+						if (contactsPerVertex[vertexIndex] >= maxSelfCollisionContactsPerVertex) continue;
+						if (vertexIndex == p1Index || vertexIndex == p2Index || vertexIndex == p3Index) continue;
+						if (meshAdjacency[vertexIndex].count(p1Index) != 0
+							|| meshAdjacency[vertexIndex].count(p2Index) != 0
+							|| meshAdjacency[vertexIndex].count(p3Index) != 0) {
+							continue;
+						}
+
+						const Vector3f& q = p[vertexIndex];
+						const float unsignedDistance = std::abs((q - p1).dot(currentNormal));
+						if (unsignedDistance >= selfCollisionThickness) continue;
+
+						const float previousNormalLength = (x[p2Index] - x[p1Index]).cross(x[p3Index] - x[p1Index]).norm();
+						bool flipNormal = false;
+						if (previousNormalLength > 1e-8f) {
+							Vector3f previousNormal = (x[p2Index] - x[p1Index]).cross(x[p3Index] - x[p1Index]);
+							previousNormal /= previousNormalLength;
+							flipNormal = (x[vertexIndex] - x[p1Index]).dot(previousNormal) < 0.0f;
+						}
+
+						const unsigned int orientedP2 = flipNormal ? p3Index : p2Index;
+						const unsigned int orientedP3 = flipNormal ? p2Index : p3Index;
+						const Vector3f& orientedP1 = p[p1Index];
+						const Vector3f& orientedP2Pos = p[orientedP2];
+						const Vector3f& orientedP3Pos = p[orientedP3];
+
+						Vector3f orientedNormal = (orientedP2Pos - orientedP1).cross(orientedP3Pos - orientedP1);
+						const float orientedNormalLength = orientedNormal.norm();
+						if (orientedNormalLength <= 1e-8f) continue;
+						orientedNormal /= orientedNormalLength;
+
+						const float previousSignedDistance = (x[vertexIndex] - x[p1Index]).dot(orientedNormal);
+						const float signedDistance = (q - orientedP1).dot(orientedNormal);
+						if (signedDistance >= selfCollisionThickness) continue;
+
+						// Crossing-based filtering reduces false positives from nearby
+						// parallel layers. Keep only contacts that crossed the triangle
+						// plane or entered the thickness band from outside.
+						const bool crossedPlane = previousSignedDistance > 0.0f && signedDistance < 0.0f;
+						const bool enteredThicknessBand = previousSignedDistance >= selfCollisionThickness
+							&& signedDistance < selfCollisionThickness;
+						if (!crossedPlane && !enteredThicknessBand) continue;
+
+						const Vector3f projectedPoint = q - signedDistance * orientedNormal;
+						Eigen::Vector3f barycentric;
+						if (!pointProjectsInsideTriangle(
+							projectedPoint,
+							orientedP1,
+							orientedP2Pos,
+							orientedP3Pos,
+							barycentric
+						)) {
+							continue;
+						}
+
+						generatedCollisionConstraints.push_back(
+							std::make_unique<SphereCollisionConstraint>(
+								vertexIndex,
+								p1Index,
+								orientedP2,
+								orientedP3,
+								selfCollisionThickness,
+								orientedNormal,
+								barycentric,
+								selfCollisionStiffness
+							)
+						);
+						// Limiting contacts per vertex reduces conflicting constraints in
+						// dense folds, which helps suppress pinching and spike artifacts.
+						++contactsPerVertex[vertexIndex];
+					}
+				}
+			}
+		}
+	}
 }
 
 void PBDSolver::projectConstraints(const ConstraintList& constraints) {
@@ -586,6 +824,9 @@ void PBDSolver::updateVelocities(float dt) {
 		}
 
 		v[i] = (p[i] - x[i]) / dt;
+		if (v[i].norm() < velocitySleepThreshold) {
+			v[i] = Vector3f::Zero();
+		}
 	}
 }
 
@@ -703,19 +944,25 @@ void PBDSolver::addSphereCollider(const Vector3f& center, float radius) {
 	sphereColliders.push_back(SphereCollider{ center, radius });
 }
 
-void PBDSolver::addDistanceConstraints(const std::vector<unsigned int>& indices, float stiffness) {
+void PBDSolver::addDistanceConstraints(
+	const std::vector<unsigned int>& indices,
+	float stiffness,
+	std::vector<PBDConstraint*>* constraintGroup
+) {
 	for (unsigned int index : indices) {
 		if (index >= system->spring_list.size()) continue;
 
 		const Edge& edge = system->spring_list[index];
-		persistentConstraints.push_back(
-			std::make_unique<DistanceConstraint>(
-				edge.first,
-				edge.second,
-				system->rest_lengths[index],
-				stiffness
-			)
+		auto constraint = std::make_unique<DistanceConstraint>(
+			edge.first,
+			edge.second,
+			system->rest_lengths[index],
+			stiffness
 		);
+		if (constraintGroup != nullptr) {
+			constraintGroup->push_back(constraint.get());
+		}
+		persistentConstraints.push_back(std::move(constraint));
 	}
 }
 
@@ -764,34 +1011,108 @@ void PBDSolver::addDihedralBendConstraints(float stiffness) {
 			);
 			if (!valid) continue;
 
-			persistentConstraints.push_back(
-				std::make_unique<DihedralBendConstraint>(
-					firstTriangle.edge0,
-					firstTriangle.edge1,
-					firstTriangle.opposite,
-					opposite,
-					restAngle,
-					stiffness
-				)
+			auto constraint = std::make_unique<DihedralBendConstraint>(
+				firstTriangle.edge0,
+				firstTriangle.edge1,
+				firstTriangle.opposite,
+				opposite,
+				restAngle,
+				stiffness
 			);
+			bendConstraints.push_back(constraint.get());
+			persistentConstraints.push_back(std::move(constraint));
 		}
 	}
 }
 
 void PBDSolver::addStructuralConstraints(const std::vector<unsigned int>& indices, float stiffness) {
-	addDistanceConstraints(indices, stiffness);
+	structuralStiffness = std::max(0.0f, std::min(1.0f, stiffness));
+	addDistanceConstraints(indices, structuralStiffness, &structuralConstraints);
 }
 
 void PBDSolver::addShearConstraints(const std::vector<unsigned int>& indices, float stiffness) {
-	addDistanceConstraints(indices, stiffness);
+	shearStiffness = std::max(0.0f, std::min(1.0f, stiffness));
+	addDistanceConstraints(indices, shearStiffness, &shearConstraints);
 }
 
 void PBDSolver::addBendConstraints(const std::vector<unsigned int>&, float stiffness) {
 	// Bending is generated from adjacent triangle pairs rather than from longer
 	// spring edges. This measures the cloth's fold angle directly and therefore
 	// remains meaningful even when in-plane stretching changes edge lengths.
-	addDihedralBendConstraints(stiffness);
+	bendStiffness = std::max(0.0f, std::min(1.0f, stiffness));
+	addDihedralBendConstraints(bendStiffness);
 
 
 	// addDistanceConstraints(indices, stiffness); for distance-based bending --- IGNORE ---
+}
+
+void PBDSolver::setGravity(float gravityMagnitude) {
+	gravity = Vector3f(0.0f, 0.0f, -std::max(0.0f, gravityMagnitude));
+}
+
+float PBDSolver::getGravity() const {
+	return -gravity.z();
+}
+
+void PBDSolver::setDampingFactor(float damping) {
+	dampingFactor = std::max(0.0f, std::min(1.0f, damping));
+}
+
+float PBDSolver::getDampingFactor() const {
+	return dampingFactor;
+}
+
+void PBDSolver::setSolverIterations(unsigned int iterations) {
+	solverIterations = std::max(1u, iterations);
+}
+
+unsigned int PBDSolver::getSolverIterations() const {
+	return solverIterations;
+}
+
+void PBDSolver::setStructuralStiffness(float stiffness) {
+	structuralStiffness = std::max(0.0f, std::min(1.0f, stiffness));
+	setConstraintGroupStiffness(structuralConstraints, structuralStiffness);
+}
+
+float PBDSolver::getStructuralStiffness() const {
+	return structuralStiffness;
+}
+
+void PBDSolver::setShearStiffness(float stiffness) {
+	shearStiffness = std::max(0.0f, std::min(1.0f, stiffness));
+	setConstraintGroupStiffness(shearConstraints, shearStiffness);
+}
+
+float PBDSolver::getShearStiffness() const {
+	return shearStiffness;
+}
+
+void PBDSolver::setBendStiffness(float stiffness) {
+	bendStiffness = std::max(0.0f, std::min(1.0f, stiffness));
+	setConstraintGroupStiffness(bendConstraints, bendStiffness);
+}
+
+float PBDSolver::getBendStiffness() const {
+	return bendStiffness;
+}
+
+void PBDSolver::setSelfCollisionStiffness(float stiffness) {
+	selfCollisionStiffness = std::max(0.0f, std::min(1.0f, stiffness));
+}
+
+float PBDSolver::getSelfCollisionStiffness() const {
+	return selfCollisionStiffness;
+}
+
+float PBDSolver::getSelfCollisionThickness() const {
+	return selfCollisionThickness;
+}
+
+void PBDSolver::setMaxSelfCollisionContactsPerVertex(unsigned int maxContacts) {
+	maxSelfCollisionContactsPerVertex = std::max(1u, maxContacts);
+}
+
+unsigned int PBDSolver::getMaxSelfCollisionContactsPerVertex() const {
+	return maxSelfCollisionContactsPerVertex;
 }

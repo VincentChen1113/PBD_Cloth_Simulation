@@ -61,13 +61,6 @@ static pbd_system* g_pbdSystem;
 static PBDSolver* g_pbdSolver;
 static float g_selfCollisionThicknessOverride = -1.0f;
 
-// Solver selection
-// enum class SolverMode {
-//     MassSpring,
-//     PBD
-// };
-
-// static SolverMode g_solverMode = SolverMode::MassSpring; // default to mass-spring solver, switch to PBD later
 
 // System parameters for fast-mass-spring
 namespace SystemParam {

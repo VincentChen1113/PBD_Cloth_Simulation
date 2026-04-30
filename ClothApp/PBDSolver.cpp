@@ -8,14 +8,14 @@
 #include <unordered_set>
 
 namespace PBDDefaultParam {
-	static const unsigned int solverIterations = 10;
-	static const float dampingFactor = 0.02f;
+	static const unsigned int solverIterations = 8;
+	static const float dampingFactor = 0.09f;
 	static const float collisionEps = 1e-4f;
 	static const float collisionStiffness = 1.0f;
 	static const float contactFriction = 0.15f;
-	static const float selfCollisionStiffness = 0.2f;
+	static const float selfCollisionStiffness = 0.05f;
 	static const unsigned int maxSelfCollisionContactsPerVertex = 6u;
-	static const float velocitySleepThreshold = 2e-3f;
+	static const float velocitySleepThreshold = 5e-3f;
 	static const Eigen::Vector3f gravity(0.0f, 0.0f, -9.81f);
 }
 
@@ -664,7 +664,7 @@ PBDSolver::PBDSolver(pbd_system* system, float* vbuff)
 	  solverIterations(PBDDefaultParam::solverIterations),
 	  dampingFactor(PBDDefaultParam::dampingFactor),
 	  collisionEps(PBDDefaultParam::collisionEps),
-	  structuralStiffness(1.0f),
+	  structuralStiffness(0.9f),
 	  shearStiffness(0.7f),
 	  bendStiffness(0.05f),
 	  selfCollisionThickness(PBDDefaultParam::collisionEps),

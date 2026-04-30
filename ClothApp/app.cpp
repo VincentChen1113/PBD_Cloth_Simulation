@@ -18,7 +18,7 @@
 // G L O B A L S ///////////////////////////////////////////////////////////////////
 
 // Window
-static int g_windowWidth = 640, g_windowHeight = 640;
+static int g_windowWidth = 1280, g_windowHeight = 1280;
 static bool g_mouseClickDown = false;
 static bool g_mouseLClickButton, g_mouseRClickButton, g_mouseMClickButton;
 static int g_mouseClickX;

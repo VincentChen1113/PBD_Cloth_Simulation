@@ -147,6 +147,11 @@ struct SphereCollider {
 	float radius;
 };
 
+struct PlaneCollider {
+	Eigen::Vector3f point;
+	Eigen::Vector3f normal;
+};
+
 // Generated collision constraint:
 // - sphere contact:          C(p_i) = |p_i - c| - r
 // - self vertex-triangle:    C(q, p1, p2, p3) = (q - p1) . n - h
@@ -155,6 +160,7 @@ class SphereCollisionConstraint : public PBDConstraint {
 private:
 	enum class CollisionKind {
 		Sphere,
+		Plane,
 		SelfVertexTriangle
 	};
 
@@ -162,11 +168,24 @@ private:
 	Eigen::Vector3f center;
 	float radius;
 	float offset;
+	Eigen::Vector3f planeNormal;
 	Eigen::Vector3f selfCollisionNormal;
 	Eigen::Vector3f selfCollisionBarycentric;
 
+	bool selfCollisionGeometry(
+		const std::vector<Vector3f>& positions,
+		Eigen::Vector3f& outNormal,
+		Eigen::Vector3f& outBarycentric
+	) const;
+
 public:
 	SphereCollisionConstraint(unsigned int i, const Eigen::Vector3f& center, float radius, float stiffness = 1.0f);
+	SphereCollisionConstraint(
+		unsigned int i,
+		const Eigen::Vector3f& planePoint,
+		const Eigen::Vector3f& planeNormal,
+		float stiffness = 1.0f
+	);
 	SphereCollisionConstraint(
 		unsigned int vertex,
 		unsigned int p1,
@@ -217,6 +236,7 @@ private:
 	float* vbuff;
 
 	// particle state
+	std::vector<Vector3f> restX;          // reference positions used to preserve the original cloth side in self-collision
 	std::vector<Vector3f> x;              // current positions x_i
 	std::vector<Vector3f> p;              // predicted positions p_i
 	std::vector<Vector3f> v;              // velocities v_i
@@ -232,6 +252,7 @@ private:
 	// Collision primitives persist, but actual collision constraints are generated
 	// fresh each step from the predicted positions x -> p.
 	std::vector<SphereCollider> sphereColliders;
+	std::vector<PlaneCollider> planeColliders;
 	ConstraintList generatedCollisionConstraints;
 	std::vector<std::unordered_set<unsigned int>> meshAdjacency;
 
@@ -242,6 +263,7 @@ private:
 	float structuralStiffness;
 	float shearStiffness;
 	float bendStiffness;
+	float planeFriction;
 	float selfCollisionThickness;
 	float selfCollisionStiffness;
 	float selfCollisionCellSize;
@@ -260,6 +282,7 @@ private:
 	void generateSelfCollisionConstraints();
 	void projectConstraints(const ConstraintList& constraints);
 	void setConstraintGroupStiffness(const std::vector<PBDConstraint*>& constraints, float stiffness);
+	void applyPlaneFriction();
 
 	void updateVelocities(float dt);
 	void commitPositions();
@@ -285,16 +308,20 @@ public:
 	virtual void fixPoint(unsigned int i) override;
 	virtual void releasePoint(unsigned int i) override;
 	void addSphereCollider(const Vector3f& center, float radius);
+	void addPlaneCollider(const Vector3f& point, const Vector3f& normal);
 	void setGravity(float gravityMagnitude);
 	float getGravity() const;
 	void setDampingFactor(float damping);
 	float getDampingFactor() const;
+	void setPlaneFriction(float friction);
+	float getPlaneFriction() const;
 	void setSolverIterations(unsigned int iterations);
 	unsigned int getSolverIterations() const;
+	void setVelocitySleepThreshold(float threshold);
+	float getVelocitySleepThreshold() const;
 	void setSelfCollisionThickness(float thickness) {
 		if (thickness <= 0.0f) return;
 		selfCollisionThickness = std::max(thickness, collisionEps);
-		selfCollisionCellSize = selfCollisionThickness;
 	}
 	void setStructuralStiffness(float stiffness);
 	float getStructuralStiffness() const;

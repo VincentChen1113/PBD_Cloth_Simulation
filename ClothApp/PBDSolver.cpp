@@ -9,11 +9,12 @@
 
 namespace PBDDefaultParam {
 	static const unsigned int solverIterations = 10;
-	static const float dampingFactor = 0.01f;
+	static const float dampingFactor = 0.02f;
 	static const float collisionEps = 1e-4f;
 	static const float collisionStiffness = 1.0f;
+	static const float contactFriction = 0.15f;
 	static const float selfCollisionStiffness = 0.2f;
-	static const unsigned int maxSelfCollisionContactsPerVertex = 2u;
+	static const unsigned int maxSelfCollisionContactsPerVertex = 6u;
 	static const float velocitySleepThreshold = 2e-3f;
 	static const Eigen::Vector3f gravity(0.0f, 0.0f, -9.81f);
 }
@@ -122,6 +123,129 @@ bool pointProjectsInsideTriangle(
 	return barycentric.x() >= tolerance
 		&& barycentric.y() >= tolerance
 		&& barycentric.z() >= tolerance;
+}
+
+bool triangleNormalAndSignedDistance(
+	const std::vector<Eigen::Vector3f>& positions,
+	unsigned int vertexIndex,
+	unsigned int p1Index,
+	unsigned int p2Index,
+	unsigned int p3Index,
+	Eigen::Vector3f& outNormal,
+	float& outSignedDistance
+) {
+	if (vertexIndex >= positions.size()
+		|| p1Index >= positions.size()
+		|| p2Index >= positions.size()
+		|| p3Index >= positions.size()) {
+		return false;
+	}
+
+	const Eigen::Vector3f& p1 = positions[p1Index];
+	const Eigen::Vector3f& p2 = positions[p2Index];
+	const Eigen::Vector3f& p3 = positions[p3Index];
+	outNormal = (p2 - p1).cross(p3 - p1);
+	const float normalLength = outNormal.norm();
+	if (normalLength <= 1e-8f) {
+		return false;
+	}
+
+	outNormal /= normalLength;
+	outSignedDistance = (positions[vertexIndex] - p1).dot(outNormal);
+	return true;
+}
+
+bool previousFrameSideAndNormal(
+	const std::vector<Eigen::Vector3f>& previousPositions,
+	const std::vector<Eigen::Vector3f>& referencePositions,
+	unsigned int vertexIndex,
+	unsigned int p1Index,
+	unsigned int p2Index,
+	unsigned int p3Index,
+	bool& flipNormal,
+	float& outSignedDistance
+) {
+	Eigen::Vector3f normal;
+
+	// Use the previous frame to decide which side the vertex came from so the
+	// contact direction follows the paper's above/below logic. The undeformed
+	// pose remains a fallback if the previous triangle is degenerate or nearly
+	// coplanar with the vertex.
+	const bool previousValid = triangleNormalAndSignedDistance(
+		previousPositions,
+		vertexIndex,
+		p1Index,
+		p2Index,
+		p3Index,
+		normal,
+		outSignedDistance
+	);
+	if (!previousValid || std::abs(outSignedDistance) <= 1e-6f) {
+		if (!triangleNormalAndSignedDistance(
+			referencePositions,
+			vertexIndex,
+			p1Index,
+			p2Index,
+			p3Index,
+			normal,
+			outSignedDistance
+		)) {
+			return false;
+		}
+	}
+
+	flipNormal = outSignedDistance < 0.0f;
+	if (flipNormal) outSignedDistance = -outSignedDistance;
+	return true;
+}
+
+float averageEdgeLength(const Eigen::VectorXf& restLengths) {
+	float sum = 0.0f;
+	unsigned int count = 0u;
+	for (int i = 0; i < restLengths.size(); ++i) {
+		const float restLength = restLengths[i];
+		if (restLength <= 1e-6f) continue;
+		sum += restLength;
+		++count;
+	}
+	if (count == 0u) return 0.0f;
+	return sum / static_cast<float>(count);
+}
+
+void applySphereContactDamping(
+	std::vector<Eigen::Vector3f>& positions,
+	const std::vector<Eigen::Vector3f>& previousPositions,
+	const std::vector<float>& invMass,
+	const std::vector<SphereCollider>& sphereColliders,
+	float collisionEps
+) {
+	if (sphereColliders.empty()) return;
+
+	const float friction = std::max(0.0f, std::min(1.0f, PBDDefaultParam::contactFriction));
+	if (friction <= 0.0f) return;
+
+	const float contactBand = 2.0f * collisionEps;
+	for (const SphereCollider& collider : sphereColliders) {
+		for (unsigned int i = 0; i < positions.size() && i < previousPositions.size() && i < invMass.size(); ++i) {
+			if (invMass[i] == 0.0f) continue;
+
+			Eigen::Vector3f radial = positions[i] - collider.center;
+			const float radialLength = radial.norm();
+			if (radialLength > collider.radius + contactBand) continue;
+
+			if (radialLength <= 1e-8f) {
+				radial = Eigen::Vector3f(0.0f, 0.0f, 1.0f);
+			}
+			else {
+				radial /= radialLength;
+			}
+
+			const Eigen::Vector3f displacement = positions[i] - previousPositions[i];
+			const Eigen::Vector3f normalDisplacement = displacement.dot(radial) * radial;
+			const Eigen::Vector3f tangentialDisplacement = displacement - normalDisplacement;
+			positions[i] = previousPositions[i] + normalDisplacement + (1.0f - friction) * tangentialDisplacement;
+		}
+	}
 }
 
 float dihedralAngleFromPositions(
@@ -541,8 +665,8 @@ PBDSolver::PBDSolver(pbd_system* system, float* vbuff)
 	  dampingFactor(PBDDefaultParam::dampingFactor),
 	  collisionEps(PBDDefaultParam::collisionEps),
 	  structuralStiffness(1.0f),
-	  shearStiffness(1.0f),
-	  bendStiffness(1.0f),
+	  shearStiffness(0.7f),
+	  bendStiffness(0.05f),
 	  selfCollisionThickness(PBDDefaultParam::collisionEps),
 	  selfCollisionStiffness(PBDDefaultParam::selfCollisionStiffness),
 	  selfCollisionCellSize(PBDDefaultParam::collisionEps),
@@ -567,13 +691,18 @@ PBDSolver::PBDSolver(pbd_system* system, float* vbuff)
 			minRestLength = std::min(minRestLength, restLength);
 		}
 	}
+	const float meanRestLength = averageEdgeLength(system->rest_lengths);
 
 	if (minRestLength < std::numeric_limits<float>::max()) {
 		// Self-collision should model a thin cloth thickness, not half an edge
 		// length. Large thickness inflates folded cloth and causes false
 		// repulsion between nearby layers.
 		selfCollisionThickness = std::max(0.02f * minRestLength, collisionEps);
-		selfCollisionCellSize = selfCollisionThickness;
+	}
+	if (meanRestLength > 0.0f) {
+		// Broad-phase hashing is more reliable when cells match the cloth's edge
+		// scale instead of the much smaller thickness band.
+		selfCollisionCellSize = std::max(meanRestLength, collisionEps);
 	}
 }
 
@@ -589,6 +718,7 @@ void PBDSolver::setConstraintGroupStiffness(const std::vector<PBDConstraint*>& c
 void PBDSolver::initializeState() {
 	const unsigned int n = system->n_points;
 	// Pseudo-code (1)-(3): initialize x, p, v, w.
+	restX.resize(n);
 	x.resize(n);
 	p.resize(n);
 	v.resize(n);
@@ -602,6 +732,9 @@ void PBDSolver::initializeState() {
 			vbuff[3 * i + 2]
 		);
 
+		// Preserve the initial pose as the reference side for future
+		// vertex-triangle self-collision tests.
+		restX[i] = pos;
 		x[i] = pos;
 		p[i] = pos;
 
@@ -744,14 +877,23 @@ void PBDSolver::generateSelfCollisionConstraints() {
 						const float unsignedDistance = std::abs((q - p1).dot(currentNormal));
 						if (unsignedDistance >= selfCollisionThickness) continue;
 
-						const float previousNormalLength = (x[p2Index] - x[p1Index]).cross(x[p3Index] - x[p1Index]).norm();
 						bool flipNormal = false;
-						if (previousNormalLength > 1e-8f) {
-							Vector3f previousNormal = (x[p2Index] - x[p1Index]).cross(x[p3Index] - x[p1Index]);
-							previousNormal /= previousNormalLength;
-							flipNormal = (x[vertexIndex] - x[p1Index]).dot(previousNormal) < 0.0f;
+						float previousSignedDistance = 0.0f;
+						if (!previousFrameSideAndNormal(
+							x,
+							restX,
+							vertexIndex,
+							p1Index,
+							p2Index,
+							p3Index,
+							flipNormal,
+							previousSignedDistance
+						)) {
+							continue;
 						}
 
+						// Reorient the contact to the side the vertex occupied in the
+						// previous frame before building the current-step inequality.
 						const unsigned int orientedP2 = flipNormal ? p3Index : p2Index;
 						const unsigned int orientedP3 = flipNormal ? p2Index : p3Index;
 						const Vector3f& orientedP1 = p[p1Index];
@@ -763,14 +905,12 @@ void PBDSolver::generateSelfCollisionConstraints() {
 						if (orientedNormalLength <= 1e-8f) continue;
 						orientedNormal /= orientedNormalLength;
 
-						const float previousSignedDistance = (x[vertexIndex] - x[p1Index]).dot(orientedNormal);
 						const float signedDistance = (q - orientedP1).dot(orientedNormal);
 						if (signedDistance >= selfCollisionThickness) continue;
 
-						// Crossing-based filtering reduces false positives from nearby
-						// parallel layers. Keep only contacts that crossed the triangle
-						// plane or entered the thickness band from outside.
-						const bool crossedPlane = previousSignedDistance > 0.0f && signedDistance < 0.0f;
+						// Generate a contact when the vertex crosses the plane over the
+						// step or enters the thickness band from the previous frame.
+						const bool crossedPlane = previousSignedDistance > collisionEps && signedDistance < 0.0f;
 						const bool enteredThicknessBand = previousSignedDistance >= selfCollisionThickness
 							&& signedDistance < selfCollisionThickness;
 						if (!crossedPlane && !enteredThicknessBand) continue;
@@ -861,6 +1001,7 @@ void PBDSolver::step(float dt) {
 		projectConstraints(persistentConstraints);
 		projectConstraints(generatedCollisionConstraints);
 	}
+	applySphereContactDamping(p, x, invMass, sphereColliders, collisionEps);
 
 	updateVelocities(dt);
 	commitPositions();

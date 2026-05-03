@@ -19,7 +19,7 @@ The primary goal of this project is to implement a **Position-Based Dynamics (PB
 The current codebase now includes both:
 
 - the original **fast mass-spring solver** for baseline comparison
-- a separate **PBD cloth solver** with stretch, shear, bend, fixed-point, sphere collision, plane collision, self-collision, a dedicated floor-drop scene, and optional debug diagnostics
+- a separate **PBD cloth solver** with stretch, shear, bend, fixed-point, sphere collision, plane collision, self-collision, a dedicated floor-drop scene, a simple hang-wind scene, and optional debug diagnostics
 
 ### Objectives
 
@@ -50,12 +50,14 @@ The current PBD solver includes:
 - sphere and plane collision as generated inequality constraints
 - self-collision detection and resolution with debug counters
 - a dedicated `drop-floor` scene for floor interaction and tuning
+- a simple `hang_wind` scene with bottom-half wind acceleration control
 
 ### Demo
 
 Available runtime scenes:
 
 - `pbd hang`
+- `pbd hang_wind`
 - `pbd drop`
 - `pbd drop-floor`
 
@@ -99,13 +101,13 @@ The executable supports both long-form and short-form mode selection:
 
 ```bash
 ./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug]
-./fast-mass-spring pbd [hang|drop|drop-floor] [--self-thickness value] [--debug]
+./fast-mass-spring pbd [hang|hang_wind|drop|drop-floor] [--self-thickness value] [--debug] [--wind-accel value]
 ```
 
 Or equivalently:
 
 ```bash
-./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-drop|pbd-drop-floor] [--self-thickness value] [--debug]
+./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang_wind|pbd-drop|pbd-drop-floor] [--self-thickness value] [--debug] [--wind-accel value]
 ```
 
 Examples:
@@ -114,6 +116,8 @@ Examples:
 ./fast-mass-spring mass-spring hang
 ./fast-mass-spring ms drop
 ./fast-mass-spring pbd hang
+./fast-mass-spring pbd hang_wind --wind-accel 5
+./fast-mass-spring pbd-hang_wind --wind-accel -5
 ./fast-mass-spring pbd drop
 ./fast-mass-spring pbd drop-floor
 ./fast-mass-spring pbd drop-floor --self-thickness 0.02
@@ -123,7 +127,8 @@ Examples:
 Flags:
 
 - `--self-thickness value`: overrides the PBD self-collision thickness with a positive float value
-- `--debug`: enables debug diagnostics output. At the moment this is primarily useful for the PBD floor demo, where self-collision counters are printed to the terminal
+- `--wind-accel value`: required for `pbd hang_wind`; accepts a float in `[-15, 15]`. Positive values push the lower half of the hanging cloth inward, perpendicular to gravity, and negative values push it outward
+- `--debug`: enables debug diagnostics output for PBD demos and prints self-collision counters to the terminal
 
 If no arguments are provided, the program defaults to the mass-spring hanging cloth demo.
 
@@ -181,7 +186,7 @@ Status snapshot for the current implementation:
 
 ## Advanced / Stretch Goals
 - [ ] Implement mesh collision
-- [ ] Add wind / extra forces
+- [x] Add wind / extra forces
 - [ ] Add runtime parameter controls
 - [ ] Benchmark performance
 - [ ] Record comparison demos / metrics

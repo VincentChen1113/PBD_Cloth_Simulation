@@ -284,6 +284,9 @@ private:
 	unsigned int maxSelfCollisionContactsPerVertex;
 	float velocitySleepThreshold;
 	Vector3f gravity;
+	Vector3f bottomHalfWindAcceleration;
+	Vector3f bottomHalfWindDirection;
+	float bottomHalfRestYThreshold;
 
 	// -----------------------------
 	// 1. Constructor / Initialization
@@ -388,6 +391,8 @@ public:
 	float getSelfCollisionThickness() const;
 	void setMaxSelfCollisionContactsPerVertex(unsigned int maxContacts);
 	unsigned int getMaxSelfCollisionContactsPerVertex() const;
+	void setBottomHalfWindAcceleration(float accelerationMagnitude);
+	float getBottomHalfWindAcceleration() const;
 
 	// -----------------------------
 	// 8. Debug / Diagnostics

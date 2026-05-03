@@ -762,7 +762,10 @@ PBDSolver::PBDSolver(pbd_system* system, float* vbuff)
 	  selfCollisionCellSize(PBDDefaultParam::collisionEps),
 	  maxSelfCollisionContactsPerVertex(PBDDefaultParam::maxSelfCollisionContactsPerVertex),
 	  velocitySleepThreshold(PBDDefaultParam::velocitySleepThreshold),
-	  gravity(PBDDefaultParam::gravity) {
+	  gravity(PBDDefaultParam::gravity),
+	  bottomHalfWindAcceleration(Vector3f::Zero()),
+	  bottomHalfWindDirection(Vector3f(0.0f, 1.0f, 0.0f)),
+	  bottomHalfRestYThreshold(0.0f) {
 	assert(system != nullptr);
 	assert(vbuff != nullptr);
 
@@ -793,6 +796,23 @@ PBDSolver::PBDSolver(pbd_system* system, float* vbuff)
 		// Broad-phase hashing is more reliable when cells match the cloth's edge
 		// scale instead of the much smaller thickness band.
 		selfCollisionCellSize = std::max(meanRestLength, collisionEps);
+	}
+
+	if (!restX.empty()) {
+		float minRestY = restX.front().y();
+		float maxRestY = restX.front().y();
+		for (const Vector3f& restPos : restX) {
+			minRestY = std::min(minRestY, restPos.y());
+			maxRestY = std::max(maxRestY, restPos.y());
+		}
+		bottomHalfRestYThreshold = 0.5f * (minRestY + maxRestY);
+
+		// For the hang_wind demo, "inward" means from the lower half toward the
+		// cloth interior/top edge, i.e. along +y in the rest grid. This keeps the
+		// wind perpendicular to gravity instead of pushing along the cloth normal.
+		if ((maxRestY - minRestY) > 1e-6f) {
+			bottomHalfWindDirection = Vector3f(0.0f, 1.0f, 0.0f);
+		}
 	}
 }
 
@@ -895,6 +915,9 @@ void PBDSolver::applyExternalForces(float dt) {
 	for (unsigned int i = 0; i < n; ++i) {
 		if (invMass[i] == 0.0f) continue; // fixed particles do not accelerate
 		v[i] += dt * gravity;
+		if (restX[i].y() <= bottomHalfRestYThreshold) {
+			v[i] += dt * bottomHalfWindAcceleration;
+		}
 	}
 }
 
@@ -1477,6 +1500,15 @@ void PBDSolver::setMaxSelfCollisionContactsPerVertex(unsigned int maxContacts) {
 
 unsigned int PBDSolver::getMaxSelfCollisionContactsPerVertex() const {
 	return maxSelfCollisionContactsPerVertex;
+}
+
+void PBDSolver::setBottomHalfWindAcceleration(float accelerationMagnitude) {
+	bottomHalfWindAcceleration = accelerationMagnitude * bottomHalfWindDirection;
+}
+
+float PBDSolver::getBottomHalfWindAcceleration() const {
+	if (bottomHalfWindDirection.squaredNorm() <= 1e-12f) return 0.0f;
+	return bottomHalfWindAcceleration.dot(bottomHalfWindDirection);
 }
 
 // -----------------------------

@@ -66,6 +66,8 @@ static MassSpringSolver* g_solver;
 static pbd_system* g_pbdSystem;
 static PBDSolver* g_pbdSolver;
 static float g_selfCollisionThicknessOverride = -1.0f;
+static float g_bottomHalfWindAcceleration = 0.0f;
+static bool g_bottomHalfWindAccelerationProvided = false;
 static unsigned int g_pbdFrameCounter = 0u;
 static bool g_enableDebugDiagnostics = false;
 
@@ -125,6 +127,7 @@ static void initGlutState(int, char**);
 static void initGLState();
 static void parseSimMode(int, char**);
 static void parseOptionalArgs(int argc, char** argv, int startIndex);
+static void validateParsedOptions();
 
 static void initShaders(); // Read, compile and link shaders
 static void initCloth(); // Generate cloth mesh
@@ -143,6 +146,7 @@ enum class SimMode {
 	MassSpringHang,
 	MassSpringDrop,
 	PBDHang,
+	PBDHangWind,
 	PBDDrop,
 	PBDDropFloor
 };
@@ -152,6 +156,7 @@ static SimMode g_mode = SimMode::MassSpringHang; // default to mass-spring hangi
 static void demo_hang();
 static void demo_drop();
 static void demo_pbd_hang();
+static void demo_pbd_hang_wind();
 static void demo_pbd_drop();
 static void demo_pbd_drop_floor();
 static void(*g_demo)() = demo_hang;
@@ -170,6 +175,9 @@ static void selectDemo() {
 		break;
 	case SimMode::PBDHang:
 		g_demo = demo_pbd_hang;
+		break;
+	case SimMode::PBDHangWind:
+		g_demo = demo_pbd_hang_wind;
 		break;
 	case SimMode::PBDDrop:
 		g_demo = demo_pbd_drop;
@@ -207,6 +215,7 @@ void checkGlErrors();
 int main(int argc, char** argv) {
 	try {
 		parseSimMode(argc, argv);
+		validateParsedOptions();
 		initGlutState(argc, argv);
 		glewInit();
 		initGLState();
@@ -235,32 +244,35 @@ static void parseSimMode(int argc, char** argv) {
 	if (argc <= 1) return;
 
 	const std::string arg1(argv[1]);
-	if (argc == 2) {
-		if (arg1 == "mass-spring-hang" || arg1 == "ms-hang") {
-			g_mode = SimMode::MassSpringHang;
-			parseOptionalArgs(argc, argv, 2);
-			return;
-		}
-		if (arg1 == "mass-spring-drop" || arg1 == "ms-drop") {
-			g_mode = SimMode::MassSpringDrop;
-			parseOptionalArgs(argc, argv, 2);
-			return;
-		}
-		if (arg1 == "pbd-hang") {
-			g_mode = SimMode::PBDHang;
-			parseOptionalArgs(argc, argv, 2);
-			return;
-		}
-		if (arg1 == "pbd-drop") {
-			g_mode = SimMode::PBDDrop;
-			parseOptionalArgs(argc, argv, 2);
-			return;
-		}
-		if (arg1 == "pbd-drop-floor") {
-			g_mode = SimMode::PBDDropFloor;
-			parseOptionalArgs(argc, argv, 2);
-			return;
-		}
+	if (arg1 == "mass-spring-hang" || arg1 == "ms-hang") {
+		g_mode = SimMode::MassSpringHang;
+		parseOptionalArgs(argc, argv, 2);
+		return;
+	}
+	if (arg1 == "mass-spring-drop" || arg1 == "ms-drop") {
+		g_mode = SimMode::MassSpringDrop;
+		parseOptionalArgs(argc, argv, 2);
+		return;
+	}
+	if (arg1 == "pbd-hang") {
+		g_mode = SimMode::PBDHang;
+		parseOptionalArgs(argc, argv, 2);
+		return;
+	}
+	if (arg1 == "pbd-hang_wind" || arg1 == "pbd-hang-wind") {
+		g_mode = SimMode::PBDHangWind;
+		parseOptionalArgs(argc, argv, 2);
+		return;
+	}
+	if (arg1 == "pbd-drop") {
+		g_mode = SimMode::PBDDrop;
+		parseOptionalArgs(argc, argv, 2);
+		return;
+	}
+	if (arg1 == "pbd-drop-floor") {
+		g_mode = SimMode::PBDDropFloor;
+		parseOptionalArgs(argc, argv, 2);
+		return;
 	}
 
 	if (argc >= 3) {
@@ -281,6 +293,11 @@ static void parseSimMode(int argc, char** argv) {
 			parseOptionalArgs(argc, argv, 3);
 			return;
 		}
+		if (solver == "pbd" && (scene == "hang_wind" || scene == "hang-wind")) {
+			g_mode = SimMode::PBDHangWind;
+			parseOptionalArgs(argc, argv, 3);
+			return;
+		}
 		if (solver == "pbd" && scene == "drop") {
 			g_mode = SimMode::PBDDrop;
 			parseOptionalArgs(argc, argv, 3);
@@ -294,7 +311,7 @@ static void parseSimMode(int argc, char** argv) {
 	}
 
 	throw std::runtime_error(
-		"Usage: ./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug], ./fast-mass-spring pbd [hang|drop|drop-floor] [--self-thickness value] [--debug], or ./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-drop|pbd-drop-floor] [--self-thickness value] [--debug]"
+		"Usage: ./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug], ./fast-mass-spring pbd [hang|hang_wind|drop|drop-floor] [--self-thickness value] [--debug] [--wind-accel value], or ./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang_wind|pbd-drop|pbd-drop-floor] [--self-thickness value] [--debug] [--wind-accel value]"
 	);
 }
 
@@ -322,7 +339,33 @@ static void parseOptionalArgs(int argc, char** argv, int startIndex) {
 			continue;
 		}
 
+		if (arg == "--wind-accel") {
+			if (g_mode != SimMode::PBDHangWind) {
+				throw std::runtime_error("--wind-accel is only valid for the pbd hang_wind demo");
+			}
+			if (i + 1 >= argc) {
+				throw std::runtime_error("Missing value after --wind-accel");
+			}
+
+			std::stringstream valueStream(argv[++i]);
+			float acceleration = 0.0f;
+			valueStream >> acceleration;
+			if (!valueStream || !valueStream.eof() || acceleration < -15.0f || acceleration > 15.0f) {
+				throw std::runtime_error("--wind-accel expects a float value in [-15, 15]");
+			}
+
+			g_bottomHalfWindAcceleration = acceleration;
+			g_bottomHalfWindAccelerationProvided = true;
+			continue;
+		}
+
 		throw std::runtime_error("Unknown argument: " + arg);
+	}
+}
+
+static void validateParsedOptions() {
+	if (g_mode == SimMode::PBDHangWind && !g_bottomHalfWindAccelerationProvided) {
+		throw std::runtime_error("The pbd hang_wind demo requires --wind-accel with a value in [-15, 15]");
 	}
 }
 
@@ -353,6 +396,7 @@ static void initGLState() {
 
 static bool isPBDMode() {
 	return g_mode == SimMode::PBDHang
+		|| g_mode == SimMode::PBDHangWind
 		|| g_mode == SimMode::PBDDrop
 		|| g_mode == SimMode::PBDDropFloor;
 }
@@ -638,6 +682,37 @@ static void demo_pbd_hang() {
 	initMouseInteraction(g_pbdSolver, n);
 }
 
+static void demo_pbd_hang_wind() {
+	const unsigned int n = PBDSystemParam::n;
+
+	MassSpringBuilder builder;
+	builder.uniformGrid(
+		PBDSystemParam::n,
+		PBDSystemParam::h,
+		PBDSystemParam::r,
+		1.0f,
+		PBDSystemParam::m,
+		PBDSystemParam::a,
+		PBDSystemParam::g
+	);
+
+	mass_spring_system* temp = builder.getResult();
+	g_pbdSystem = buildPBDSystem(*temp);
+	delete temp;
+	g_pbdSolver = new PBDSolver(g_pbdSystem, g_clothMesh->vbuff());
+	if (g_selfCollisionThicknessOverride > 0.0f) {
+		g_pbdSolver->setSelfCollisionThickness(g_selfCollisionThicknessOverride);
+	}
+	g_pbdSolver->setBottomHalfWindAcceleration(g_bottomHalfWindAcceleration);
+	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), PBDSystemParam::k_stretch);
+	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
+	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDSystemParam::k_bend);
+	g_pbdSolver->pinPoint(0);
+	g_pbdSolver->pinPoint(n - 1);
+	g_pbdFrameCounter = 0u;
+	initMouseInteraction(g_pbdSolver, n);
+}
+
 static void demo_pbd_drop() {
 	const unsigned int n = PBDSystemParam::n;
 	MassSpringBuilder builder;
@@ -825,7 +900,9 @@ static void logPBDSelfCollisionDiagnostics() {
 	if ((g_pbdFrameCounter % PBDDebugParam::debugPrintPeriod) != 0u) return;
 
 	const SelfCollisionDebugStats& stats = g_pbdSolver->getSelfCollisionDebugStats();
-	const char* modeLabel = isFloorDemo() ? "pbd drop-floor" : (g_mode == SimMode::PBDDrop ? "pbd drop" : "pbd hang");
+	const char* modeLabel = isFloorDemo()
+		? "pbd drop-floor"
+		: (g_mode == SimMode::PBDDrop ? "pbd drop" : (g_mode == SimMode::PBDHangWind ? "pbd hang_wind" : "pbd hang"));
 	std::cout
 		<< "[" << modeLabel << " self-collision] frame=" << g_pbdFrameCounter
 		<< " generated=" << stats.generatedContacts

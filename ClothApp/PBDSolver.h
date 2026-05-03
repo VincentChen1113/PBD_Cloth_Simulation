@@ -154,9 +154,10 @@ struct PlaneCollider {
 
 // Generated collision constraint:
 // - sphere contact:          C(p_i) = |p_i - c| - r
+// - plane/static contact:    C(p_i) = (p_i - q_c) . n_c
 // - self vertex-triangle:    C(q, p1, p2, p3) = (q - p1) . n - h
 // Both are inequality constraints and are satisfied when C >= 0.
-class SphereCollisionConstraint : public PBDConstraint {
+class CollisionConstraint : public PBDConstraint {
 private:
 	enum class CollisionKind {
 		Sphere,
@@ -179,14 +180,14 @@ private:
 	) const;
 
 public:
-	SphereCollisionConstraint(unsigned int i, const Eigen::Vector3f& center, float radius, float stiffness = 1.0f);
-	SphereCollisionConstraint(
+	CollisionConstraint(unsigned int i, const Eigen::Vector3f& center, float radius, float stiffness = 1.0f);
+	CollisionConstraint(
 		unsigned int i,
 		const Eigen::Vector3f& planePoint,
 		const Eigen::Vector3f& planeNormal,
 		float stiffness = 1.0f
 	);
-	SphereCollisionConstraint(
+	CollisionConstraint(
 		unsigned int vertex,
 		unsigned int p1,
 		unsigned int p2,
@@ -219,6 +220,14 @@ struct pbd_system {
 	Eigen::VectorXf rest_lengths;
 	Eigen::VectorXf masses;
 	std::vector<unsigned int> triangle_indices;
+};
+
+struct SelfCollisionDebugStats {
+	unsigned int generatedContacts = 0u;
+	unsigned int initiallyViolatedContacts = 0u;
+	unsigned int remainingViolatedContacts = 0u;
+	float maxInitialPenetration = 0.0f;
+	float maxRemainingPenetration = 0.0f;
 };
 
 // -----------------------------
@@ -254,7 +263,12 @@ private:
 	std::vector<SphereCollider> sphereColliders;
 	std::vector<PlaneCollider> planeColliders;
 	ConstraintList generatedCollisionConstraints;
+	std::vector<CollisionConstraint*> generatedSelfCollisionConstraints;
+	std::vector<Vector3f> planeContactPoints;
+	std::vector<Vector3f> planeContactNormals;
+	std::vector<float> planeContactSignedDistances;
 	std::vector<std::unordered_set<unsigned int>> meshAdjacency;
+	SelfCollisionDebugStats selfCollisionDebugStats;
 
 	// simulation parameters
 	unsigned int solverIterations;
@@ -281,8 +295,9 @@ private:
 	void generateCollisionConstraints();
 	void generateSelfCollisionConstraints();
 	void projectConstraints(const ConstraintList& constraints);
+	void updateSelfCollisionDebugStats(const std::vector<Vector3f>& positions, bool afterProjection);
 	void setConstraintGroupStiffness(const std::vector<PBDConstraint*>& constraints, float stiffness);
-	void applyPlaneFriction();
+	void applyPlaneContactVelocityDamping();
 
 	void updateVelocities(float dt);
 	void commitPositions();
@@ -344,4 +359,5 @@ public:
 	std::vector<Vector3f>& getPositions() { return x; }
 	std::vector<Vector3f>& getPredictedPositions() { return p; }
 	std::vector<Vector3f>& getVelocities() { return v; }
+	const SelfCollisionDebugStats& getSelfCollisionDebugStats() const { return selfCollisionDebugStats; }
 };

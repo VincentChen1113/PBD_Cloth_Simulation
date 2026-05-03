@@ -27,9 +27,15 @@ static int g_mouseClickY;
 // User Interaction
 static UserInteraction* UI;
 static Renderer* g_pickRenderer;
+static ProgramInput* g_floor_target;
 
 // Constants
 static const float PI = glm::pi<float>();
+static const glm::vec3 g_floor_albedo(0.55f, 0.55f, 0.58f);
+static const glm::vec3 g_floor_ambient(0.04f, 0.04f, 0.04f);
+static const float g_floor_collision_height = -1.75f;
+static const float g_floor_render_offset = -0.002f;
+static const float g_floor_extent = 3.5f;
 
 // Shader Handles
 static PhongShader* g_phongShader; // linked phong shader
@@ -60,7 +66,18 @@ static MassSpringSolver* g_solver;
 static pbd_system* g_pbdSystem;
 static PBDSolver* g_pbdSolver;
 static float g_selfCollisionThicknessOverride = -1.0f;
+static unsigned int g_pbdFrameCounter = 0u;
+static bool g_enableDebugDiagnostics = false;
 
+// Constraint Graph
+static CgRootNode* g_cgRootNode;
+
+// Scene parameters
+static const float g_camera_distance = 4.2f;
+
+// Scene matrices
+static glm::mat4 g_ModelViewMatrix;
+static glm::mat4 g_ProjectionMatrix;
 
 // System parameters for fast-mass-spring
 namespace SystemParam {
@@ -76,32 +93,29 @@ namespace SystemParam {
 
 // System parameters for PBD
 namespace PBDSystemParam {
-    static const int n = 33; // must be odd, n * n = n_vertices
-    static const float w = 2.0f; // cloth width
-    static const float h = 0.008f; // time step
-    static const float r = w / (n - 1); // rest length
-    static const float m = 0.25f / (n * n); // point mass
-    static const float g = 9.8f; // gravitational acceleration
+	static const int n = 21; // must be odd, n * n = n_vertices
+	static const float w = 2.0f; // cloth width
+	static const float h = 0.008f; // time step
+	static const float r = w / (n - 1); // rest length
+	static const float m = 0.25f / (n * n); // point mass
+	static const float g = 9.8f; // gravitational acceleration
 
-    static const int n_iter = 10; // solver iterations
-    static const float a = 0.01f; // damping factor
-    static const float eps = 1e-4f; // collision epsilon
-	static const float k_stretch = 1.0f;
-	static const float k_shear = 1.0f;
-	static const float k_bend = 0.05f;
+	static const int n_iter = 15; // solver iterations
+	static const float a = 0.02f; // damping factor
+	static const float eps = 1e-4f; // collision epsilon
+	static const float k_stretch = 1.0f; // stretch stiffness | 1.0f
+	static const float k_shear = 0.8f; // shear stiffness | 0.8f
+	static const float k_bend = 0.01f; // bend stiffness | 0.1f
 	static const float sphere_radius = 0.64f;
 }
 
-// Constraint Graph
-static CgRootNode* g_cgRootNode;	// not required for pbd, but useful for fast-mass-spring demo
-
-// Scene parameters
-static const float g_camera_distance = 4.2f;
-
-// Scene matrices
-static glm::mat4 g_ModelViewMatrix;
-static glm::mat4 g_ProjectionMatrix;
-
+namespace PBDFloorDemoParam {
+	static const float h = 0.003f;
+	static const int n_iter = 28;
+	static const float selfCollisionStiffness = 0.45f;
+	static const unsigned int maxSelfCollisionContactsPerVertex = 18u;
+	static const unsigned int debugPrintPeriod = 20u;
+}
 // F U N C T I O N S //////////////////////////////////////////////////////////////
 // state initialization
 static void initGlutState(int, char**);
@@ -111,8 +125,11 @@ static void parseOptionalArgs(int argc, char** argv, int startIndex);
 
 static void initShaders(); // Read, compile and link shaders
 static void initCloth(); // Generate cloth mesh
+static void initFloor(); // Generate floor mesh
 static void initScene(); // Generate scene matrices
 static void initMouseInteraction(FixedPointController*, unsigned int);
+static void orientClothForFloorDrop();
+static void logFloorSelfCollisionDiagnostics();
 static bool isPBDMode();
 static unsigned int activeGridSize();
 static float activeClothWidth();
@@ -123,7 +140,8 @@ enum class SimMode {
 	MassSpringHang,
 	MassSpringDrop,
 	PBDHang,
-	PBDDrop
+	PBDDrop,
+	PBDDropFloor
 };
 
 static SimMode g_mode = SimMode::MassSpringHang; // default to mass-spring hanging demo, switch to other demos later
@@ -132,7 +150,12 @@ static void demo_hang();
 static void demo_drop();
 static void demo_pbd_hang();
 static void demo_pbd_drop();
+static void demo_pbd_drop_floor();
 static void(*g_demo)() = demo_hang;
+
+static bool isFloorDemo() {
+	return g_mode == SimMode::PBDDropFloor;
+}
 
 static void selectDemo() {
 	switch (g_mode) {
@@ -148,6 +171,9 @@ static void selectDemo() {
 	case SimMode::PBDDrop:
 		g_demo = demo_pbd_drop;
 		break;
+	case SimMode::PBDDropFloor:
+		g_demo = demo_pbd_drop_floor;
+		break;
 	}
 }
 
@@ -158,6 +184,7 @@ static void mouse(int, int, int, int);
 static void motion(int, int);
 
 // draw cloth function
+static void drawFloor();
 static void drawCloth();
 static void animateCloth(int value);
 
@@ -184,6 +211,7 @@ int main(int argc, char** argv) {
 		selectDemo();
 		initShaders();
 		initCloth();
+		initFloor();
 		initScene();
 
 		glutTimerFunc(g_animation_timer, animateCloth, 0);
@@ -225,6 +253,11 @@ static void parseSimMode(int argc, char** argv) {
 			parseOptionalArgs(argc, argv, 2);
 			return;
 		}
+		if (arg1 == "pbd-drop-floor") {
+			g_mode = SimMode::PBDDropFloor;
+			parseOptionalArgs(argc, argv, 2);
+			return;
+		}
 	}
 
 	if (argc >= 3) {
@@ -250,16 +283,26 @@ static void parseSimMode(int argc, char** argv) {
 			parseOptionalArgs(argc, argv, 3);
 			return;
 		}
+		if (solver == "pbd" && scene == "drop-floor") {
+			g_mode = SimMode::PBDDropFloor;
+			parseOptionalArgs(argc, argv, 3);
+			return;
+		}
 	}
 
 	throw std::runtime_error(
-		"Usage: ./fast-mass-spring [mass-spring|ms|pbd] [hang|drop] [--self-thickness value] or ./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-drop] [--self-thickness value]"
+		"Usage: ./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug], ./fast-mass-spring pbd [hang|drop|drop-floor] [--self-thickness value] [--debug], or ./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-drop|pbd-drop-floor] [--self-thickness value] [--debug]"
 	);
 }
 
 static void parseOptionalArgs(int argc, char** argv, int startIndex) {
 	for (int i = startIndex; i < argc; ++i) {
 		const std::string arg(argv[i]);
+		if (arg == "--debug") {
+			g_enableDebugDiagnostics = true;
+			continue;
+		}
+
 		if (arg == "--self-thickness") {
 			if (i + 1 >= argc) {
 				throw std::runtime_error("Missing value after --self-thickness");
@@ -306,7 +349,9 @@ static void initGLState() {
 }
 
 static bool isPBDMode() {
-	return g_mode == SimMode::PBDHang || g_mode == SimMode::PBDDrop;
+	return g_mode == SimMode::PBDHang
+		|| g_mode == SimMode::PBDDrop
+		|| g_mode == SimMode::PBDDropFloor;
 }
 
 static unsigned int activeGridSize() {
@@ -361,6 +406,38 @@ static void initCloth() {
 	g_demo();
 }
 
+static void initFloor() {
+	const float floorRenderHeight = g_floor_collision_height + g_floor_render_offset;
+	const float floorPositions[] = {
+		-g_floor_extent, -g_floor_extent, floorRenderHeight,
+		 g_floor_extent, -g_floor_extent, floorRenderHeight,
+		 g_floor_extent,  g_floor_extent, floorRenderHeight,
+		-g_floor_extent,  g_floor_extent, floorRenderHeight
+	};
+	const float floorNormals[] = {
+		0.0f, 0.0f, 1.0f,
+		0.0f, 0.0f, 1.0f,
+		0.0f, 0.0f, 1.0f,
+		0.0f, 0.0f, 1.0f
+	};
+	const float floorTexcoords[] = {
+		0.0f, 0.0f,
+		1.0f, 0.0f,
+		1.0f, 1.0f,
+		0.0f, 1.0f
+	};
+	unsigned int floorIndices[] = {
+		0, 1, 2,
+		0, 2, 3
+	};
+
+	g_floor_target = new ProgramInput;
+	g_floor_target->setPositionData(const_cast<float*>(floorPositions), 12);
+	g_floor_target->setNormalData(const_cast<float*>(floorNormals), 12);
+	g_floor_target->setTextureData(const_cast<float*>(floorTexcoords), 8);
+	g_floor_target->setIndexData(floorIndices, 6);
+}
+
 static void initScene() {
 	g_ModelViewMatrix = glm::lookAt(
 		glm::vec3(0.618, -0.786, 0.3f) * g_camera_distance,
@@ -368,6 +445,33 @@ static void initScene() {
 		glm::vec3(0.0f, 0.0f, 1.0f)
 	) * glm::translate(glm::mat4(1), glm::vec3(0.0f, 0.0f, activeClothWidth() / 4));
 	updateProjection();
+}
+
+static void orientClothForFloorDrop() {
+	if (g_clothMesh == nullptr || g_render_target == nullptr) return;
+
+	const float width = activeClothWidth();
+	const float halfWidth = 0.5f * width;
+	const float lift = g_floor_collision_height + 0.5f * width + 0.35f;
+	float* const positions = g_clothMesh->vbuff();
+	const unsigned int vertexCount = g_clothMesh->n_vertices();
+
+	for (unsigned int i = 0; i < vertexCount; ++i) {
+		const float x = positions[3 * i + 0];
+		const float y = positions[3 * i + 1];
+		const float xNormalized = (halfWidth > 1e-6f) ? (x / halfWidth) : 0.0f;
+		const float heightNormalized = (halfWidth > 1e-6f) ? (-y / halfWidth) : 0.0f;
+		const float lateralOffset = 0.035f * xNormalized + 0.0125f * heightNormalized * heightNormalized;
+
+		positions[3 * i + 0] = x;
+		positions[3 * i + 1] = lateralOffset;
+		positions[3 * i + 2] = -y + lift;
+	}
+
+	g_clothMesh->request_face_normals();
+	g_clothMesh->update_normals();
+	g_clothMesh->release_face_normals();
+	updateRenderTarget();
 }
 
 static void initMouseInteraction(FixedPointController* mouseFixer, unsigned int n) {
@@ -501,7 +605,6 @@ static void demo_drop() {
 	deformationNode->addChild(mouseFixer);
 }
 
-
 static void demo_pbd_hang() {
 	const unsigned int n = PBDSystemParam::n;
 
@@ -559,9 +662,45 @@ static void demo_pbd_drop() {
 	g_pbdSolver->addSphereCollider(Eigen::Vector3f(0.0f, 0.0f, -1.0f), PBDSystemParam::sphere_radius);
 	initMouseInteraction(g_pbdSolver, n);
 }
+
+static void demo_pbd_drop_floor() {
+	const unsigned int n = PBDSystemParam::n;
+	const Eigen::Vector3f floorPoint(0.0f, 0.0f, g_floor_collision_height);
+	const Eigen::Vector3f floorNormal(0.0f, 0.0f, 1.0f);
+	orientClothForFloorDrop();
+	MassSpringBuilder builder;
+	builder.uniformGrid(
+		PBDSystemParam::n,
+		PBDSystemParam::h,
+		PBDSystemParam::r,
+		1.0f,
+		PBDSystemParam::m,
+		PBDSystemParam::a,
+		PBDSystemParam::g
+	);
+
+	mass_spring_system* temp = builder.getResult();
+	g_pbdSystem = buildPBDSystem(*temp);
+	delete temp;
+	g_pbdSystem->time_step = PBDFloorDemoParam::h;
+	g_pbdSolver = new PBDSolver(g_pbdSystem, g_clothMesh->vbuff());
+	g_pbdSolver->setSolverIterations(PBDFloorDemoParam::n_iter);
+	g_pbdSolver->setSelfCollisionStiffness(PBDFloorDemoParam::selfCollisionStiffness);
+	g_pbdSolver->setMaxSelfCollisionContactsPerVertex(PBDFloorDemoParam::maxSelfCollisionContactsPerVertex);
+	if (g_selfCollisionThicknessOverride > 0.0f) {
+		g_pbdSolver->setSelfCollisionThickness(g_selfCollisionThicknessOverride);
+	}
+	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), PBDSystemParam::k_stretch);
+	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
+	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDSystemParam::k_bend);
+	g_pbdSolver->addPlaneCollider(floorPoint, floorNormal);
+	g_pbdFrameCounter = 0u;
+	initMouseInteraction(g_pbdSolver, n);
+}
 // G L U T  C A L L B A C K S //////////////////////////////////////////////////////
 static void display() {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	if (isFloorDemo()) drawFloor();
 	drawCloth();
 	glutSwapBuffers();
 
@@ -617,6 +756,19 @@ static void motion(const int x, const int y) {
 }
 
 // C L O T H ///////////////////////////////////////////////////////////////////////
+static void drawFloor() {
+	Renderer renderer;
+	renderer.setProgram(g_phongShader);
+	renderer.setModelview(g_ModelViewMatrix);
+	renderer.setProjection(g_ProjectionMatrix);
+	g_phongShader->setAlbedo(g_floor_albedo);
+	g_phongShader->setAmbient(g_floor_ambient);
+	g_phongShader->setLight(g_light);
+	renderer.setProgramInput(g_floor_target);
+	renderer.setElementCount(6);
+	renderer.draw();
+}
+
 static void drawCloth() {
 	Renderer renderer;
 	renderer.setProgram(g_phongShader);
@@ -632,7 +784,14 @@ static void drawCloth() {
 
 static void animateCloth(int value) {
 	if (isPBDMode()) {
-		g_pbdSolver->solve(PBDSystemParam::n_iter);
+		const unsigned int iterationCount = isFloorDemo()
+			? g_pbdSolver->getSolverIterations()
+			: static_cast<unsigned int>(PBDSystemParam::n_iter);
+		g_pbdSolver->solve(iterationCount);
+		++g_pbdFrameCounter;
+		if (isFloorDemo() && g_enableDebugDiagnostics) {
+			logFloorSelfCollisionDiagnostics();
+		}
 	}
 	else {
 		g_solver->solve(g_iter);
@@ -655,6 +814,22 @@ static void animateCloth(int value) {
 
 	// reset timer
 	glutTimerFunc(g_animation_timer, animateCloth, 0);
+}
+
+static void logFloorSelfCollisionDiagnostics() {
+	if (g_pbdSolver == nullptr) return;
+	if (PBDFloorDemoParam::debugPrintPeriod == 0u) return;
+	if ((g_pbdFrameCounter % PBDFloorDemoParam::debugPrintPeriod) != 0u) return;
+
+	const SelfCollisionDebugStats& stats = g_pbdSolver->getSelfCollisionDebugStats();
+	std::cout
+		<< "[floor self-collision] frame=" << g_pbdFrameCounter
+		<< " generated=" << stats.generatedContacts
+		<< " initial-violations=" << stats.initiallyViolatedContacts
+		<< " remaining-violations=" << stats.remainingViolatedContacts
+		<< " max-pen-before=" << stats.maxInitialPenetration
+		<< " max-pen-after=" << stats.maxRemainingPenetration
+		<< std::endl;
 }
 
 // S C E N E  U P D A T E ///////////////////////////////////////////////////////////
@@ -683,6 +858,7 @@ static void cleanUp() {
 
 	// delete render target
 	delete g_render_target;
+	delete g_floor_target;
 
 	// delete mass-spring system
 	delete g_system;

@@ -8,13 +8,13 @@
 #include <unordered_set>
 
 namespace PBDDefaultParam {
-	static const unsigned int solverIterations = 8;
-	static const float dampingFactor = 0.09f;
+	static const unsigned int solverIterations = 10;
+	static const float dampingFactor = 0.07f;
 	static const float collisionEps = 1e-4f;
 	static const float collisionStiffness = 1.0f;
 	static const float contactFriction = 0.15f;
-	static const float selfCollisionStiffness = 0.05f;
-	static const unsigned int maxSelfCollisionContactsPerVertex = 6u;
+	static const float selfCollisionStiffness = 0.3f;
+	static const unsigned int maxSelfCollisionContactsPerVertex = 12u;
 	static const float velocitySleepThreshold = 5e-3f;
 	static const Eigen::Vector3f gravity(0.0f, 0.0f, -9.81f);
 }
@@ -78,6 +78,30 @@ SpatialHashKey hashPosition(const Eigen::Vector3f& position, float cellSize) {
 		static_cast<int>(std::floor(position.y() / cellSize)),
 		static_cast<int>(std::floor(position.z() / cellSize))
 	};
+}
+
+void insertSweptVertexIntoHash(
+	const Eigen::Vector3f& previousPosition,
+	const Eigen::Vector3f& predictedPosition,
+	float padding,
+	float cellSize,
+	unsigned int vertexIndex,
+	std::unordered_map<SpatialHashKey, std::vector<unsigned int>, SpatialHashKeyHash>& verticesByCell
+) {
+	const Eigen::Vector3f minCorner = previousPosition.cwiseMin(predictedPosition)
+		- Eigen::Vector3f::Constant(padding);
+	const Eigen::Vector3f maxCorner = previousPosition.cwiseMax(predictedPosition)
+		+ Eigen::Vector3f::Constant(padding);
+
+	const SpatialHashKey minCell = hashPosition(minCorner, cellSize);
+	const SpatialHashKey maxCell = hashPosition(maxCorner, cellSize);
+	for (int cellX = minCell.x; cellX <= maxCell.x; ++cellX) {
+		for (int cellY = minCell.y; cellY <= maxCell.y; ++cellY) {
+			for (int cellZ = minCell.z; cellZ <= maxCell.z; ++cellZ) {
+				verticesByCell[SpatialHashKey{ cellX, cellY, cellZ }].push_back(vertexIndex);
+			}
+		}
+	}
 }
 
 bool barycentricCoordinates(
@@ -210,6 +234,40 @@ float averageEdgeLength(const Eigen::VectorXf& restLengths) {
 	}
 	if (count == 0u) return 0.0f;
 	return sum / static_cast<float>(count);
+}
+
+Eigen::Vector3f closestPointOnPlane(
+	const Eigen::Vector3f& point,
+	const Eigen::Vector3f& planePoint,
+	const Eigen::Vector3f& planeNormal,
+	float* outSignedDistance = nullptr
+) {
+	const float signedDistance = (point - planePoint).dot(planeNormal);
+	if (outSignedDistance != nullptr) {
+		*outSignedDistance = signedDistance;
+	}
+	return point - signedDistance * planeNormal;
+}
+
+bool segmentPlaneContactPoint(
+	const Eigen::Vector3f& previousPosition,
+	const Eigen::Vector3f& predictedPosition,
+	const Eigen::Vector3f& planePoint,
+	const Eigen::Vector3f& planeNormal,
+	float previousSignedDistance,
+	float predictedSignedDistance,
+	Eigen::Vector3f& outContactPoint
+) {
+	const float denominator = previousSignedDistance - predictedSignedDistance;
+	if (std::abs(denominator) <= 1e-8f) {
+		return false;
+	}
+
+	const float alpha = std::max(0.0f, std::min(1.0f, previousSignedDistance / denominator));
+	outContactPoint = previousPosition + alpha * (predictedPosition - previousPosition);
+	float residual = 0.0f;
+	outContactPoint = closestPointOnPlane(outContactPoint, planePoint, planeNormal, &residual);
+	return true;
 }
 
 void applySphereContactDamping(
@@ -576,7 +634,7 @@ void FixedPointConstraint::project(
 	positions[particle] += kPrime * (fixedPosition - positions[particle]);
 }
 
-SphereCollisionConstraint::SphereCollisionConstraint(
+CollisionConstraint::CollisionConstraint(
 	unsigned int i,
 	const Eigen::Vector3f& center,
 	float radius,
@@ -587,10 +645,26 @@ SphereCollisionConstraint::SphereCollisionConstraint(
 	  center(center),
 	  radius(radius),
 	  offset(0.0f),
+	  planeNormal(Eigen::Vector3f::Zero()),
 	  selfCollisionNormal(Eigen::Vector3f::Zero()),
 	  selfCollisionBarycentric(Eigen::Vector3f::Zero()) {}
 
-SphereCollisionConstraint::SphereCollisionConstraint(
+CollisionConstraint::CollisionConstraint(
+	unsigned int i,
+	const Eigen::Vector3f& planePoint,
+	const Eigen::Vector3f& planeNormal,
+	float stiffness
+)
+	: PBDConstraint(std::vector<unsigned int>{ i }, stiffness, PBDConstraintType::Inequality),
+	  collisionKind(CollisionKind::Plane),
+	  center(planePoint),
+	  radius(0.0f),
+	  offset(0.0f),
+	  planeNormal(planeNormal.normalized()),
+	  selfCollisionNormal(Eigen::Vector3f::Zero()),
+	  selfCollisionBarycentric(Eigen::Vector3f::Zero()) {}
+
+CollisionConstraint::CollisionConstraint(
 	unsigned int vertex,
 	unsigned int p1,
 	unsigned int p2,
@@ -609,14 +683,19 @@ SphereCollisionConstraint::SphereCollisionConstraint(
 	  center(Eigen::Vector3f::Zero()),
 	  radius(0.0f),
 	  offset(thickness),
+	  planeNormal(Eigen::Vector3f::Zero()),
 	  selfCollisionNormal(normal),
 	  selfCollisionBarycentric(barycentric) {}
 
-float SphereCollisionConstraint::evaluate(const std::vector<Vector3f>& positions) const {
+float CollisionConstraint::evaluate(const std::vector<Vector3f>& positions) const {
 	if (collisionKind == CollisionKind::Sphere) {
 		// Collision inequality:
 		//   C(p_i) = |p_i - c| - r >= 0
 		return (positions[particleIndices[0]] - center).norm() - radius;
+	}
+
+	if (collisionKind == CollisionKind::Plane) {
+		return (positions[particleIndices[0]] - center).dot(planeNormal);
 	}
 
 	if (particleIndices.size() != 4) return 0.0f;
@@ -629,7 +708,7 @@ float SphereCollisionConstraint::evaluate(const std::vector<Vector3f>& positions
 	return (q - p1).dot(selfCollisionNormal) - offset;
 }
 
-void SphereCollisionConstraint::gradients(
+void CollisionConstraint::gradients(
 	const std::vector<Vector3f>& positions,
 	std::vector<Vector3f>& outGradients
 ) const {
@@ -645,6 +724,12 @@ void SphereCollisionConstraint::gradients(
 
 		// grad_{p_i} C = (p_i - c) / |p_i - c|
 		outGradients[0] = delta / length;
+		return;
+	}
+
+	if (collisionKind == CollisionKind::Plane) {
+		outGradients.assign(1, Vector3f::Zero());
+		outGradients[0] = planeNormal;
 		return;
 	}
 
@@ -664,9 +749,10 @@ PBDSolver::PBDSolver(pbd_system* system, float* vbuff)
 	  solverIterations(PBDDefaultParam::solverIterations),
 	  dampingFactor(PBDDefaultParam::dampingFactor),
 	  collisionEps(PBDDefaultParam::collisionEps),
-	  structuralStiffness(0.9f),
+	  structuralStiffness(1.0f),
 	  shearStiffness(0.7f),
-	  bendStiffness(0.05f),
+	  bendStiffness(0.03f),
+	  planeFriction(PBDDefaultParam::contactFriction),
 	  selfCollisionThickness(PBDDefaultParam::collisionEps),
 	  selfCollisionStiffness(PBDDefaultParam::selfCollisionStiffness),
 	  selfCollisionCellSize(PBDDefaultParam::collisionEps),
@@ -697,7 +783,7 @@ PBDSolver::PBDSolver(pbd_system* system, float* vbuff)
 		// Self-collision should model a thin cloth thickness, not half an edge
 		// length. Large thickness inflates folded cloth and causes false
 		// repulsion between nearby layers.
-		selfCollisionThickness = std::max(0.02f * minRestLength, collisionEps);
+		selfCollisionThickness = std::max(0.05f * minRestLength, collisionEps);
 	}
 	if (meanRestLength > 0.0f) {
 		// Broad-phase hashing is more reliable when cells match the cloth's edge
@@ -723,6 +809,9 @@ void PBDSolver::initializeState() {
 	p.resize(n);
 	v.resize(n);
 	invMass.resize(n);
+	planeContactPoints.assign(n, Vector3f::Zero());
+	planeContactNormals.assign(n, Vector3f(0.0f, 0.0f, 1.0f));
+	planeContactSignedDistances.assign(n, std::numeric_limits<float>::infinity());
 
 	for (unsigned int i = 0; i < n; ++i) {
 		// Read initial position from render vertex buffer.
@@ -800,6 +889,11 @@ void PBDSolver::generateCollisionConstraints() {
 	// Persistent colliders stay in sphereColliders, while actual contact
 	// constraints are generated per step from predicted positions p.
 	generatedCollisionConstraints.clear();
+	generatedSelfCollisionConstraints.clear();
+	selfCollisionDebugStats = SelfCollisionDebugStats{};
+	planeContactPoints.assign(system->n_points, Vector3f::Zero());
+	planeContactNormals.assign(system->n_points, Vector3f(0.0f, 0.0f, 1.0f));
+	planeContactSignedDistances.assign(system->n_points, std::numeric_limits<float>::infinity());
 
 	for (const SphereCollider& collider : sphereColliders) {
 		for (unsigned int i = 0; i < system->n_points; ++i) {
@@ -809,7 +903,7 @@ void PBDSolver::generateCollisionConstraints() {
 			if (delta.norm() >= collider.radius) continue;
 
 			generatedCollisionConstraints.push_back(
-				std::make_unique<SphereCollisionConstraint>(
+				std::make_unique<CollisionConstraint>(
 					i,
 					collider.center,
 					collider.radius + collisionEps,
@@ -819,7 +913,55 @@ void PBDSolver::generateCollisionConstraints() {
 		}
 	}
 
+	for (const PlaneCollider& collider : planeColliders) {
+		for (unsigned int i = 0; i < system->n_points; ++i) {
+			if (invMass[i] == 0.0f) continue;
+
+			const float previousSignedDistance = (x[i] - collider.point).dot(collider.normal);
+			const float predictedSignedDistance = (p[i] - collider.point).dot(collider.normal);
+			const bool crossedPlane = previousSignedDistance > collisionEps && predictedSignedDistance < 0.0f;
+			const bool insideOrNearPlane = predictedSignedDistance < collisionEps;
+			if (!crossedPlane && !insideOrNearPlane) continue;
+
+			Vector3f contactPoint = Vector3f::Zero();
+			if (crossedPlane) {
+				if (!segmentPlaneContactPoint(
+					x[i],
+					p[i],
+					collider.point,
+					collider.normal,
+					previousSignedDistance,
+					predictedSignedDistance,
+					contactPoint
+				)) {
+					contactPoint = closestPointOnPlane(p[i], collider.point, collider.normal);
+				}
+			}
+			else {
+				// Static fallback: when the predicted point is already on or below the
+				// floor, use the plane closest point as the contact anchor.
+				contactPoint = closestPointOnPlane(p[i], collider.point, collider.normal);
+			}
+
+			if (predictedSignedDistance < planeContactSignedDistances[i]) {
+				planeContactSignedDistances[i] = predictedSignedDistance;
+				planeContactPoints[i] = contactPoint;
+				planeContactNormals[i] = collider.normal;
+			}
+
+			generatedCollisionConstraints.push_back(
+				std::make_unique<CollisionConstraint>(
+					i,
+					contactPoint,
+					collider.normal,
+					PBDDefaultParam::collisionStiffness
+				)
+			);
+		}
+	}
+
 	generateSelfCollisionConstraints();
+	updateSelfCollisionDebugStats(p, false);
 }
 
 void PBDSolver::generateSelfCollisionConstraints() {
@@ -830,7 +972,14 @@ void PBDSolver::generateSelfCollisionConstraints() {
 	std::vector<unsigned int> contactsPerVertex(system->n_points, 0u);
 
 	for (unsigned int vertex = 0; vertex < p.size(); ++vertex) {
-		verticesByCell[hashPosition(p[vertex], selfCollisionCellSize)].push_back(vertex);
+		insertSweptVertexIntoHash(
+			x[vertex],
+			p[vertex],
+			selfCollisionThickness,
+			selfCollisionCellSize,
+			vertex,
+			verticesByCell
+		);
 	}
 
 	for (std::size_t triangle = 0; triangle + 2 < system->triangle_indices.size(); triangle += 3) {
@@ -847,9 +996,14 @@ void PBDSolver::generateSelfCollisionConstraints() {
 		if (currentNormalLength <= 1e-8f) continue;
 		currentNormal /= currentNormalLength;
 
-		const Vector3f minCorner = p1.cwiseMin(p2).cwiseMin(p3)
+		const Vector3f& x1 = x[p1Index];
+		const Vector3f& x2 = x[p2Index];
+		const Vector3f& x3 = x[p3Index];
+		const Vector3f minCorner = x1.cwiseMin(x2).cwiseMin(x3)
+			.cwiseMin(p1).cwiseMin(p2).cwiseMin(p3)
 			- Vector3f::Constant(selfCollisionThickness);
-		const Vector3f maxCorner = p1.cwiseMax(p2).cwiseMax(p3)
+		const Vector3f maxCorner = x1.cwiseMax(x2).cwiseMax(x3)
+			.cwiseMax(p1).cwiseMax(p2).cwiseMax(p3)
 			+ Vector3f::Constant(selfCollisionThickness);
 
 		const SpatialHashKey minCell = hashPosition(minCorner, selfCollisionCellSize);
@@ -909,11 +1063,13 @@ void PBDSolver::generateSelfCollisionConstraints() {
 						if (signedDistance >= selfCollisionThickness) continue;
 
 						// Generate a contact when the vertex crosses the plane over the
-						// step or enters the thickness band from the previous frame.
+						// step, enters the thickness band, or is still overlapping from a
+						// previously missed/self-persistent contact.
 						const bool crossedPlane = previousSignedDistance > collisionEps && signedDistance < 0.0f;
 						const bool enteredThicknessBand = previousSignedDistance >= selfCollisionThickness
 							&& signedDistance < selfCollisionThickness;
-						if (!crossedPlane && !enteredThicknessBand) continue;
+						const bool persistentOverlap = previousSignedDistance < selfCollisionThickness;
+						if (!crossedPlane && !enteredThicknessBand && !persistentOverlap) continue;
 
 						const Vector3f projectedPoint = q - signedDistance * orientedNormal;
 						Eigen::Vector3f barycentric;
@@ -927,24 +1083,52 @@ void PBDSolver::generateSelfCollisionConstraints() {
 							continue;
 						}
 
-						generatedCollisionConstraints.push_back(
-							std::make_unique<SphereCollisionConstraint>(
-								vertexIndex,
-								p1Index,
-								orientedP2,
-								orientedP3,
-								selfCollisionThickness,
-								orientedNormal,
-								barycentric,
-								selfCollisionStiffness
-							)
+						auto constraint = std::make_unique<CollisionConstraint>(
+							vertexIndex,
+							p1Index,
+							orientedP2,
+							orientedP3,
+							selfCollisionThickness,
+							orientedNormal,
+							barycentric,
+							selfCollisionStiffness
 						);
+						generatedSelfCollisionConstraints.push_back(constraint.get());
+						generatedCollisionConstraints.push_back(std::move(constraint));
 						// Limiting contacts per vertex reduces conflicting constraints in
 						// dense folds, which helps suppress pinching and spike artifacts.
 						++contactsPerVertex[vertexIndex];
 					}
 				}
 			}
+		}
+	}
+}
+
+void PBDSolver::updateSelfCollisionDebugStats(const std::vector<Vector3f>& positions, bool afterProjection) {
+	if (!afterProjection) {
+		selfCollisionDebugStats.generatedContacts = static_cast<unsigned int>(generatedSelfCollisionConstraints.size());
+		selfCollisionDebugStats.initiallyViolatedContacts = 0u;
+		selfCollisionDebugStats.maxInitialPenetration = 0.0f;
+	}
+	else {
+		selfCollisionDebugStats.remainingViolatedContacts = 0u;
+		selfCollisionDebugStats.maxRemainingPenetration = 0.0f;
+	}
+
+	for (const CollisionConstraint* constraint : generatedSelfCollisionConstraints) {
+		if (constraint == nullptr) continue;
+		const float value = constraint->evaluate(positions);
+		if (value >= 0.0f) continue;
+
+		const float penetration = -value;
+		if (!afterProjection) {
+			++selfCollisionDebugStats.initiallyViolatedContacts;
+			selfCollisionDebugStats.maxInitialPenetration = std::max(selfCollisionDebugStats.maxInitialPenetration, penetration);
+		}
+		else {
+			++selfCollisionDebugStats.remainingViolatedContacts;
+			selfCollisionDebugStats.maxRemainingPenetration = std::max(selfCollisionDebugStats.maxRemainingPenetration, penetration);
 		}
 	}
 }
@@ -990,8 +1174,9 @@ void PBDSolver::step(float dt) {
 	// 3. predict positions
 	// 4. generate collision constraints
 	// 5. iterate projections
-	// 6. update velocities
-	// 7. commit positions
+	// 6. update velocities from projected positions
+	// 7. apply post-collision velocity manipulation (friction)
+	// 8. commit positions
 	applyExternalForces(dt);
 	dampVelocities();
 	predictPositions(dt);
@@ -1002,8 +1187,10 @@ void PBDSolver::step(float dt) {
 		projectConstraints(generatedCollisionConstraints);
 	}
 	applySphereContactDamping(p, x, invMass, sphereColliders, collisionEps);
+	updateSelfCollisionDebugStats(p, true);
 
 	updateVelocities(dt);
+	applyPlaneContactVelocityDamping();
 	commitPositions();
 }
 
@@ -1087,6 +1274,12 @@ void PBDSolver::addSphereCollider(const Vector3f& center, float radius) {
 	// Store persistent collision geometry. Actual contact constraints are
 	// generated each step from predicted positions.
 	sphereColliders.push_back(SphereCollider{ center, radius });
+}
+
+void PBDSolver::addPlaneCollider(const Vector3f& point, const Vector3f& normal) {
+	const float normalLength = normal.norm();
+	if (normalLength <= 1e-8f) return;
+	planeColliders.push_back(PlaneCollider{ point, normal / normalLength });
 }
 
 void PBDSolver::addDistanceConstraints(
@@ -1207,12 +1400,28 @@ float PBDSolver::getDampingFactor() const {
 	return dampingFactor;
 }
 
+void PBDSolver::setPlaneFriction(float friction) {
+	planeFriction = std::max(0.0f, std::min(1.0f, friction));
+}
+
+float PBDSolver::getPlaneFriction() const {
+	return planeFriction;
+}
+
 void PBDSolver::setSolverIterations(unsigned int iterations) {
 	solverIterations = std::max(1u, iterations);
 }
 
 unsigned int PBDSolver::getSolverIterations() const {
 	return solverIterations;
+}
+
+void PBDSolver::setVelocitySleepThreshold(float threshold) {
+	velocitySleepThreshold = std::max(0.0f, threshold);
+}
+
+float PBDSolver::getVelocitySleepThreshold() const {
+	return velocitySleepThreshold;
 }
 
 void PBDSolver::setStructuralStiffness(float stiffness) {
@@ -1260,4 +1469,31 @@ void PBDSolver::setMaxSelfCollisionContactsPerVertex(unsigned int maxContacts) {
 
 unsigned int PBDSolver::getMaxSelfCollisionContactsPerVertex() const {
 	return maxSelfCollisionContactsPerVertex;
+}
+
+void PBDSolver::applyPlaneContactVelocityDamping() {
+	if (planeContactSignedDistances.empty()) return;
+
+	const float friction = std::max(0.0f, std::min(1.0f, planeFriction));
+	const float tangentialSleepSpeed = velocitySleepThreshold;
+	for (unsigned int i = 0; i < v.size() && i < invMass.size()
+		&& i < planeContactSignedDistances.size()
+		&& i < planeContactNormals.size(); ++i) {
+		if (invMass[i] == 0.0f) continue;
+		if (!std::isfinite(planeContactSignedDistances[i])) continue;
+
+		const Vector3f& contactNormal = planeContactNormals[i];
+		const float normalSpeed = v[i].dot(contactNormal);
+		const float separatingSpeed = std::max(0.0f, normalSpeed);
+		const Vector3f normalVelocity = separatingSpeed * contactNormal;
+		Vector3f tangentialVelocity = v[i] - normalSpeed * contactNormal;
+		if (friction > 0.0f) {
+			tangentialVelocity *= (1.0f - friction);
+		}
+		if (tangentialVelocity.norm() <= tangentialSleepSpeed) {
+			tangentialVelocity = Vector3f::Zero();
+		}
+
+		v[i] = normalVelocity + tangentialVelocity;
+	}
 }

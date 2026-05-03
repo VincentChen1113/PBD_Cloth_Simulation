@@ -93,27 +93,30 @@ namespace SystemParam {
 
 // System parameters for PBD
 namespace PBDSystemParam {
-	static const int n = 33; // must be odd, n * n = n_vertices
+	static const int n = 55; // must be odd, n * n = n_vertices
 	static const float w = 2.0f; // cloth width
 	static const float h = 0.008f; // time step
 	static const float r = w / (n - 1); // rest length
 	static const float m = 0.25f / (n * n); // point mass
 	static const float g = 9.8f; // gravitational acceleration
 
-	static const int n_iter = 15; // solver iterations
+	static const int n_iter = 20; // solver iterations | 15
 	static const float a = 0.02f; // damping factor
 	static const float eps = 1e-4f; // collision epsilon
 	static const float k_stretch = 1.0f; // stretch stiffness | 1.0f
 	static const float k_shear = 0.8f; // shear stiffness | 0.8f
-	static const float k_bend = 0.01f; // bend stiffness | 0.1f
+	static const float k_bend = 0.01f; // bend stiffness | 0.01f
 	static const float sphere_radius = 0.64f;
 }
 
 namespace PBDFloorDemoParam {
 	static const float h = 0.003f;
 	static const int n_iter = 28;
-	static const float selfCollisionStiffness = 0.45f;
-	static const unsigned int maxSelfCollisionContactsPerVertex = 18u;
+	static const float selfCollisionStiffness = 0.45; // 0.45
+	static const unsigned int maxSelfCollisionContactsPerVertex = 4u; // 4u
+}
+
+namespace PBDDebugParam {
 	static const unsigned int debugPrintPeriod = 20u;
 }
 // F U N C T I O N S //////////////////////////////////////////////////////////////
@@ -129,7 +132,7 @@ static void initFloor(); // Generate floor mesh
 static void initScene(); // Generate scene matrices
 static void initMouseInteraction(FixedPointController*, unsigned int);
 static void orientClothForFloorDrop();
-static void logFloorSelfCollisionDiagnostics();
+static void logPBDSelfCollisionDiagnostics();
 static bool isPBDMode();
 static unsigned int activeGridSize();
 static float activeClothWidth();
@@ -789,8 +792,8 @@ static void animateCloth(int value) {
 			: static_cast<unsigned int>(PBDSystemParam::n_iter);
 		g_pbdSolver->solve(iterationCount);
 		++g_pbdFrameCounter;
-		if (isFloorDemo() && g_enableDebugDiagnostics) {
-			logFloorSelfCollisionDiagnostics();
+		if (g_enableDebugDiagnostics) {
+			logPBDSelfCollisionDiagnostics();
 		}
 	}
 	else {
@@ -816,14 +819,15 @@ static void animateCloth(int value) {
 	glutTimerFunc(g_animation_timer, animateCloth, 0);
 }
 
-static void logFloorSelfCollisionDiagnostics() {
+static void logPBDSelfCollisionDiagnostics() {
 	if (g_pbdSolver == nullptr) return;
-	if (PBDFloorDemoParam::debugPrintPeriod == 0u) return;
-	if ((g_pbdFrameCounter % PBDFloorDemoParam::debugPrintPeriod) != 0u) return;
+	if (PBDDebugParam::debugPrintPeriod == 0u) return;
+	if ((g_pbdFrameCounter % PBDDebugParam::debugPrintPeriod) != 0u) return;
 
 	const SelfCollisionDebugStats& stats = g_pbdSolver->getSelfCollisionDebugStats();
+	const char* modeLabel = isFloorDemo() ? "pbd drop-floor" : (g_mode == SimMode::PBDDrop ? "pbd drop" : "pbd hang");
 	std::cout
-		<< "[floor self-collision] frame=" << g_pbdFrameCounter
+		<< "[" << modeLabel << " self-collision] frame=" << g_pbdFrameCounter
 		<< " generated=" << stats.generatedContacts
 		<< " initial-violations=" << stats.initiallyViolatedContacts
 		<< " remaining-violations=" << stats.remainingViolatedContacts

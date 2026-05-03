@@ -1,5 +1,4 @@
-### Fast Mass-Spring System Simulator
-# PBD Cloth Simulation (CSE 328 Final Project)
+### PBD Cloth Simulation (CSE 328 Final Project)
 Name: Vincent Chen
 SBU ID: 115598737
 

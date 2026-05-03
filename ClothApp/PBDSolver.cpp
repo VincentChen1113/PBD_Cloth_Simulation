@@ -8,13 +8,13 @@
 #include <unordered_set>
 
 namespace PBDDefaultParam {
-	static const unsigned int solverIterations = 10;
+	static const unsigned int solverIterations = 15;
 	static const float dampingFactor = 0.07f;
 	static const float collisionEps = 1e-4f;
 	static const float collisionStiffness = 1.0f;
 	static const float contactFriction = 0.15f;
 	static const float selfCollisionStiffness = 0.3f;
-	static const unsigned int maxSelfCollisionContactsPerVertex = 12u;
+	static const unsigned int maxSelfCollisionContactsPerVertex = 4u;    // 12u
 	static const float velocitySleepThreshold = 5e-3f;
 	static const Eigen::Vector3f gravity(0.0f, 0.0f, -9.81f);
 }

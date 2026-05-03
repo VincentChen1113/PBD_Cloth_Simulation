@@ -17,6 +17,11 @@ This project extends a C++ implementation of *Fast Simulation of Mass-Spring Sys
 
 The primary goal of this project is to implement a **Position-Based Dynamics (PBD)** solver for cloth simulation, based on Müller et al. (2007). A new solver will be implemented from scratch while reusing the rendering and mesh infrastructure from the original repository.
 
+The current codebase now includes both:
+
+- the original **fast mass-spring solver** for baseline comparison
+- a separate **PBD cloth solver** with stretch, shear, bend, fixed-point, sphere collision, plane collision, self-collision, a dedicated floor-drop scene, and optional debug diagnostics
+
 ### Objectives
 
 - Implement a **PBD solver** for cloth simulation  
@@ -39,11 +44,21 @@ This section demonstrates the original solver from the forked repository, based 
 
 ## Position-Based Dynamics (PBD Implementation)
 
-This section will demonstrate the new PBD-based cloth simulation system implemented for this project.
+The current PBD solver includes:
+
+- fixed-point constraints for pinned particles
+- structural, shear, and bend constraints
+- sphere and plane collision as generated inequality constraints
+- self-collision detection and resolution with debug counters
+- a dedicated `drop-floor` scene for floor interaction and tuning
 
 ### Demo
 
-*(To be added)*
+Available runtime scenes:
+
+- `pbd hang`
+- `pbd drop`
+- `pbd drop-floor`
 
 ---
 
@@ -66,6 +81,12 @@ cmake ..
 cmake --build .
 ```
 
+Notes:
+
+- Run the executable from the `build` directory so shader paths resolve correctly.
+- The project fetches **OpenMesh**, **Eigen**, and **GLM** through CMake.
+- Eigen is used as a header-only dependency in the current CMake setup.
+
 ## Running
 
 Run the executable from the `build` directory so it can find the copied shader files:
@@ -78,13 +99,14 @@ cd build
 The executable supports both long-form and short-form mode selection:
 
 ```bash
-./fast-mass-spring [mass-spring|ms|pbd] [hang|drop]
+./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug]
+./fast-mass-spring pbd [hang|drop|drop-floor] [--self-thickness value] [--debug]
 ```
 
 Or equivalently:
 
 ```bash
-./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-drop]
+./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-drop|pbd-drop-floor] [--self-thickness value] [--debug]
 ```
 
 Examples:
@@ -94,7 +116,15 @@ Examples:
 ./fast-mass-spring ms drop
 ./fast-mass-spring pbd hang
 ./fast-mass-spring pbd drop
+./fast-mass-spring pbd drop-floor
+./fast-mass-spring pbd drop-floor --self-thickness 0.02
+./fast-mass-spring pbd drop-floor --debug
 ```
+
+Flags:
+
+- `--self-thickness value`: overrides the PBD self-collision thickness with a positive float value
+- `--debug`: enables debug diagnostics output. At the moment this is primarily useful for the PBD floor demo, where self-collision counters are printed to the terminal
 
 If no arguments are provided, the program defaults to the mass-spring hanging cloth demo.
 
@@ -105,6 +135,63 @@ cmake .. -DCMAKE_PERFIX_PATH:PATH=/path/to/libs
 ```
 
 You will also need to copy the DLLs to the build directory if they are not available globally.
+
+---
+
+## Task Board Checklist
+
+Status snapshot for the current implementation:
+
+## Setup / Integration
+- [x] Build and understand existing framework
+- [x] Add `PBDSolver` to project / CMake
+- [x] Hook PBDSolver into app with solver mode switch
+- [x] Preserve original mass-spring solver for comparison
+
+## Core Solver Foundation
+- [x] Implement `PBDSolver` skeleton
+- [x] Initialize particle state (`x`, `p`, `v`, `invMass`)
+- [x] Implement external force / gravity update
+- [x] Implement damping
+- [x] Implement position prediction / velocity reconstruction
+
+## Constraint System
+- [x] Implement fixed-point constraints
+- [x] Implement structural distance constraints
+- [x] Implement shear constraints
+- [x] Implement bend constraints
+- [x] Add stiffness / iteration-corrected stiffness handling
+
+## Collision Handling
+- [x] Implement plane collision
+- [x] Implement sphere collision
+- [x] Add explicit collision constraint generation stage
+- [x] Tune collision robustness / epsilon
+
+## Rendering / Output
+- [x] Write updated positions to render buffer
+- [x] Recompute normals
+- [x] Verify shading / mesh integrity after simulation
+
+## Testing / Validation
+- [ ] Validate single-particle / two-particle cases
+- [x] Validate hanging cloth behavior
+- [x] Validate cloth drop / draping demo
+- [x] Test timestep / iteration / resolution stability
+- [ ] Compare against original solver
+
+## Advanced / Stretch Goals
+- [ ] Implement mesh collision
+- [ ] Add wind / extra forces
+- [ ] Add runtime parameter controls
+- [ ] Benchmark performance
+- [ ] Record comparison demos / metrics
+
+## Final Deliverables
+- [x] Stable PBD cloth demos
+- [x] Updated README / documentation
+- [ ] Demo video / GIF
+- [ ] Final report / slides / citations
 
 ## License
 

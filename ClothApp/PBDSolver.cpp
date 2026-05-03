@@ -744,6 +744,10 @@ void CollisionConstraint::gradients(
 	outGradients[3] = -selfCollisionBarycentric[2] * selfCollisionNormal;
 }
 
+// -----------------------------
+// 1. Constructor / Initialization
+// -----------------------------
+
 PBDSolver::PBDSolver(pbd_system* system, float* vbuff)
 	: system(system), vbuff(vbuff),
 	  solverIterations(PBDDefaultParam::solverIterations),
@@ -792,15 +796,6 @@ PBDSolver::PBDSolver(pbd_system* system, float* vbuff)
 	}
 }
 
-void PBDSolver::setConstraintGroupStiffness(const std::vector<PBDConstraint*>& constraints, float stiffness) {
-	const float clamped = std::max(0.0f, std::min(1.0f, stiffness));
-	for (PBDConstraint* constraint : constraints) {
-		if (constraint != nullptr) {
-			constraint->setStiffness(clamped);
-		}
-	}
-}
-
 void PBDSolver::initializeState() {
 	const unsigned int n = system->n_points;
 	// Pseudo-code (1)-(3): initialize x, p, v, w.
@@ -836,15 +831,61 @@ void PBDSolver::initializeState() {
 	}
 }
 
-void PBDSolver::writeBackToVBuff() {
-	const unsigned int n = system->n_points;
+// -----------------------------
+// 2. Main Simulation Entry / Solver Loop
+// -----------------------------
 
-	for (unsigned int i = 0; i < n; ++i) {
-		vbuff[3 * i + 0] = x[i][0];    // x
-		vbuff[3 * i + 1] = x[i][1];    // y
-		vbuff[3 * i + 2] = x[i][2];    // z
+void PBDSolver::step(float dt) {
+	// Paper-aligned solver structure:
+	// 1. apply external forces
+	// 2. damp velocities
+	// 3. predict positions
+	// 4. generate collision constraints
+	// 5. iterate projections
+	// 6. update velocities from projected positions
+	// 7. apply post-collision velocity manipulation (friction)
+	// 8. commit positions
+	applyExternalForces(dt);
+	dampVelocities();
+	predictPositions(dt);
+	generateCollisionConstraints();
+
+	for (unsigned int iteration = 0; iteration < solverIterations; ++iteration) {
+		projectConstraints(persistentConstraints);
+		projectConstraints(generatedCollisionConstraints);
 	}
+	applySphereContactDamping(p, x, invMass, sphereColliders, collisionEps);
+	updateSelfCollisionDebugStats(p, true);
+
+	updateVelocities(dt);
+	applyPlaneContactVelocityDamping();
+	commitPositions();
 }
+
+void PBDSolver::solve(unsigned int n) {
+	// Wrapper used by the app to override the number of constraint-projection
+	// iterations for a single simulation time step.
+	//
+	// Important: n is NOT the number of outer time steps. This function still
+	// advances the simulation by exactly one dt via step(system->time_step).
+	// Instead, n temporarily replaces solverIterations, which controls the
+	// inner PBD loop inside step():
+	//   for each solver iteration:
+	//     project persistent constraints
+	//     project generated collision constraints
+	//
+	// After that one step is finished, the previous default iteration count is
+	// restored. This lets the caller choose the quality/cost of one frame update
+	// without permanently changing solver configuration.
+	const unsigned int previousIterations = solverIterations;
+	solverIterations = n;
+	step(system->time_step);
+	solverIterations = previousIterations;
+}
+
+// -----------------------------
+// 3. Core PBD Pipeline Stages
+// -----------------------------
 
 void PBDSolver::applyExternalForces(float dt) {
 	const unsigned int n = system->n_points;
@@ -883,6 +924,196 @@ void PBDSolver::predictPositions(float dt) {
 		p[i] = x[i] + dt * v[i];
 	}
 }
+
+void PBDSolver::projectConstraints(const ConstraintList& constraints) {
+	for (const ConstraintPtr& constraint : constraints) {
+		constraint->project(p, invMass, solverIterations, collisionEps);
+	}
+}
+
+void PBDSolver::updateVelocities(float dt) {
+	// Pseudo-code (16):
+	//   v_i = (p_i - x_i) / dt
+	if (dt <= 0.0f) return;
+
+	const unsigned int n = system->n_points;
+	for (unsigned int i = 0; i < n; ++i) {
+		if (invMass[i] == 0.0f) {
+			v[i] = Vector3f(0.0f, 0.0f, 0.0f);
+			continue;
+		}
+
+		v[i] = (p[i] - x[i]) / dt;
+		if (v[i].norm() < velocitySleepThreshold) {
+			v[i] = Vector3f::Zero();
+		}
+	}
+}
+
+// -----------------------------
+// 4. Persistent Constraint Setup / Constraint Construction
+// -----------------------------
+
+void PBDSolver::pinPoint(unsigned int i) {
+	fixPoint(i);
+}
+
+void PBDSolver::fixPoint(unsigned int i) {
+	if (i >= x.size()) return;
+
+	const Vector3f fixedPosition(
+		vbuff[3 * i + 0],
+		vbuff[3 * i + 1],
+		vbuff[3 * i + 2]
+	);
+
+	// Mouse dragging acts like a moving fixed point. If the point is already
+	// fixed, only update its target position. Otherwise add a new persistent
+	// fixed-point constraint.
+	auto existing = fixedPointConstraints.find(i);
+	if (existing != fixedPointConstraints.end()) {
+		existing->second->setFixedPosition(fixedPosition);
+	}
+	else {
+		auto constraint = std::make_unique<FixedPointConstraint>(i, fixedPosition, 1.0f);
+		fixedPointConstraints[i] = constraint.get();
+		persistentConstraints.push_back(std::move(constraint));
+	}
+
+	// Mark the point as immovable for all other constraints.
+	x[i] = fixedPosition;
+	p[i] = fixedPosition;
+	v[i] = Vector3f(0.0f, 0.0f, 0.0f);
+	invMass[i] = 0.0f;
+}
+
+void PBDSolver::releasePoint(unsigned int i) {
+	if (i >= x.size()) return;
+
+	auto existing = fixedPointConstraints.find(i);
+	if (existing == fixedPointConstraints.end()) return;
+
+	FixedPointConstraint* target = existing->second;
+	fixedPointConstraints.erase(existing);
+
+	persistentConstraints.erase(
+		std::remove_if(
+			persistentConstraints.begin(),
+			persistentConstraints.end(),
+			[target](const ConstraintPtr& constraint) { return constraint.get() == target; }
+		),
+		persistentConstraints.end()
+	);
+
+	const float mass = system->masses[i];
+	invMass[i] = (mass > 0.0f) ? (1.0f / mass) : 0.0f;
+}
+
+void PBDSolver::addDistanceConstraints(
+	const std::vector<unsigned int>& indices,
+	float stiffness,
+	std::vector<PBDConstraint*>* constraintGroup
+) {
+	for (unsigned int index : indices) {
+		if (index >= system->spring_list.size()) continue;
+
+		const Edge& edge = system->spring_list[index];
+		auto constraint = std::make_unique<DistanceConstraint>(
+			edge.first,
+			edge.second,
+			system->rest_lengths[index],
+			stiffness
+		);
+		if (constraintGroup != nullptr) {
+			constraintGroup->push_back(constraint.get());
+		}
+		persistentConstraints.push_back(std::move(constraint));
+	}
+}
+
+void PBDSolver::addDihedralBendConstraints(float stiffness) {
+	if (system->triangle_indices.size() < 6 || system->triangle_indices.size() % 3 != 0) return;
+
+	std::unordered_map<SharedEdgeKey, PendingTriangleEdge, SharedEdgeKeyHash> pendingEdges;
+	pendingEdges.reserve(system->triangle_indices.size());
+
+	// Build one bending constraint per interior mesh edge. Each triangle is read
+	// from the render mesh index buffer, and when the same undirected edge is
+	// seen a second time we have found the adjacent triangle pair required by the
+	// paper's 4-particle dihedral constraint.
+	for (std::size_t triangle = 0; triangle < system->triangle_indices.size(); triangle += 3) {
+		const std::array<unsigned int, 3> vertices = {
+			system->triangle_indices[triangle + 0],
+			system->triangle_indices[triangle + 1],
+			system->triangle_indices[triangle + 2]
+		};
+
+		for (int edgeIndex = 0; edgeIndex < 3; ++edgeIndex) {
+			const unsigned int edge0 = vertices[edgeIndex];
+			const unsigned int edge1 = vertices[(edgeIndex + 1) % 3];
+			const unsigned int opposite = vertices[(edgeIndex + 2) % 3];
+
+			SharedEdgeKey key{ std::min(edge0, edge1), std::max(edge0, edge1) };
+			auto existing = pendingEdges.find(key);
+			if (existing == pendingEdges.end()) {
+				pendingEdges.emplace(key, PendingTriangleEdge{ edge0, edge1, opposite });
+				continue;
+			}
+
+			const PendingTriangleEdge firstTriangle = existing->second;
+			pendingEdges.erase(existing);
+
+			bool valid = false;
+			// The rest angle theta_0 is taken from the initial cloth configuration,
+			// so the solver preserves the reference fold across this shared edge.
+			const float restAngle = dihedralAngleFromPositions(
+				x,
+				firstTriangle.edge0,
+				firstTriangle.edge1,
+				firstTriangle.opposite,
+				opposite,
+				&valid
+			);
+			if (!valid) continue;
+
+			auto constraint = std::make_unique<DihedralBendConstraint>(
+				firstTriangle.edge0,
+				firstTriangle.edge1,
+				firstTriangle.opposite,
+				opposite,
+				restAngle,
+				stiffness
+			);
+			bendConstraints.push_back(constraint.get());
+			persistentConstraints.push_back(std::move(constraint));
+		}
+	}
+}
+
+void PBDSolver::addStructuralConstraints(const std::vector<unsigned int>& indices, float stiffness) {
+	structuralStiffness = std::max(0.0f, std::min(1.0f, stiffness));
+	addDistanceConstraints(indices, structuralStiffness, &structuralConstraints);
+}
+
+void PBDSolver::addShearConstraints(const std::vector<unsigned int>& indices, float stiffness) {
+	shearStiffness = std::max(0.0f, std::min(1.0f, stiffness));
+	addDistanceConstraints(indices, shearStiffness, &shearConstraints);
+}
+
+void PBDSolver::addBendConstraints(const std::vector<unsigned int>&, float stiffness) {
+	// Bending is generated from adjacent triangle pairs rather than from longer
+	// spring edges. This measures the cloth's fold angle directly and therefore
+	// remains meaningful even when in-plane stretching changes edge lengths.
+	bendStiffness = std::max(0.0f, std::min(1.0f, stiffness));
+	addDihedralBendConstraints(bendStiffness);
+
+
+	// addDistanceConstraints(indices, stiffness); for distance-based bending --- IGNORE ---
+}
+
+// -----------------------------
+// 5. Collision Handling
+// -----------------------------
 
 void PBDSolver::generateCollisionConstraints() {
 	// The paper separates collision detection from constraint projection.
@@ -963,6 +1194,49 @@ void PBDSolver::generateCollisionConstraints() {
 	generateSelfCollisionConstraints();
 	updateSelfCollisionDebugStats(p, false);
 }
+
+void PBDSolver::addSphereCollider(const Vector3f& center, float radius) {
+	// Store persistent collision geometry. Actual contact constraints are
+	// generated each step from predicted positions.
+	sphereColliders.push_back(SphereCollider{ center, radius });
+}
+
+void PBDSolver::addPlaneCollider(const Vector3f& point, const Vector3f& normal) {
+	const float normalLength = normal.norm();
+	if (normalLength <= 1e-8f) return;
+	planeColliders.push_back(PlaneCollider{ point, normal / normalLength });
+}
+
+void PBDSolver::applyPlaneContactVelocityDamping() {
+	if (planeContactSignedDistances.empty()) return;
+
+	const float friction = std::max(0.0f, std::min(1.0f, planeFriction));
+	const float tangentialSleepSpeed = velocitySleepThreshold;
+	for (unsigned int i = 0; i < v.size() && i < invMass.size()
+		&& i < planeContactSignedDistances.size()
+		&& i < planeContactNormals.size(); ++i) {
+		if (invMass[i] == 0.0f) continue;
+		if (!std::isfinite(planeContactSignedDistances[i])) continue;
+
+		const Vector3f& contactNormal = planeContactNormals[i];
+		const float normalSpeed = v[i].dot(contactNormal);
+		const float separatingSpeed = std::max(0.0f, normalSpeed);
+		const Vector3f normalVelocity = separatingSpeed * contactNormal;
+		Vector3f tangentialVelocity = v[i] - normalSpeed * contactNormal;
+		if (friction > 0.0f) {
+			tangentialVelocity *= (1.0f - friction);
+		}
+		if (tangentialVelocity.norm() <= tangentialSleepSpeed) {
+			tangentialVelocity = Vector3f::Zero();
+		}
+
+		v[i] = normalVelocity + tangentialVelocity;
+	}
+}
+
+// -----------------------------
+// 6. Self-Collision Utilities / Helpers
+// -----------------------------
 
 void PBDSolver::generateSelfCollisionConstraints() {
 	if (system->triangle_indices.size() < 3 || selfCollisionCellSize <= 0.0f) return;
@@ -1105,283 +1379,17 @@ void PBDSolver::generateSelfCollisionConstraints() {
 	}
 }
 
-void PBDSolver::updateSelfCollisionDebugStats(const std::vector<Vector3f>& positions, bool afterProjection) {
-	if (!afterProjection) {
-		selfCollisionDebugStats.generatedContacts = static_cast<unsigned int>(generatedSelfCollisionConstraints.size());
-		selfCollisionDebugStats.initiallyViolatedContacts = 0u;
-		selfCollisionDebugStats.maxInitialPenetration = 0.0f;
-	}
-	else {
-		selfCollisionDebugStats.remainingViolatedContacts = 0u;
-		selfCollisionDebugStats.maxRemainingPenetration = 0.0f;
-	}
+// -----------------------------
+// 7. Parameter / Tuning Interface
+// -----------------------------
 
-	for (const CollisionConstraint* constraint : generatedSelfCollisionConstraints) {
-		if (constraint == nullptr) continue;
-		const float value = constraint->evaluate(positions);
-		if (value >= 0.0f) continue;
-
-		const float penetration = -value;
-		if (!afterProjection) {
-			++selfCollisionDebugStats.initiallyViolatedContacts;
-			selfCollisionDebugStats.maxInitialPenetration = std::max(selfCollisionDebugStats.maxInitialPenetration, penetration);
-		}
-		else {
-			++selfCollisionDebugStats.remainingViolatedContacts;
-			selfCollisionDebugStats.maxRemainingPenetration = std::max(selfCollisionDebugStats.maxRemainingPenetration, penetration);
+void PBDSolver::setConstraintGroupStiffness(const std::vector<PBDConstraint*>& constraints, float stiffness) {
+	const float clamped = std::max(0.0f, std::min(1.0f, stiffness));
+	for (PBDConstraint* constraint : constraints) {
+		if (constraint != nullptr) {
+			constraint->setStiffness(clamped);
 		}
 	}
-}
-
-void PBDSolver::projectConstraints(const ConstraintList& constraints) {
-	for (const ConstraintPtr& constraint : constraints) {
-		constraint->project(p, invMass, solverIterations, collisionEps);
-	}
-}
-
-void PBDSolver::updateVelocities(float dt) {
-	// Pseudo-code (16):
-	//   v_i = (p_i - x_i) / dt
-	if (dt <= 0.0f) return;
-
-	const unsigned int n = system->n_points;
-	for (unsigned int i = 0; i < n; ++i) {
-		if (invMass[i] == 0.0f) {
-			v[i] = Vector3f(0.0f, 0.0f, 0.0f);
-			continue;
-		}
-
-		v[i] = (p[i] - x[i]) / dt;
-		if (v[i].norm() < velocitySleepThreshold) {
-			v[i] = Vector3f::Zero();
-		}
-	}
-}
-
-void PBDSolver::commitPositions() {
-	const unsigned int n = system->n_points;
-	for (unsigned int i = 0; i < n; ++i) {
-		x[i] = p[i];
-	}
-
-	writeBackToVBuff();
-}
-
-void PBDSolver::step(float dt) {
-	// Paper-aligned solver structure:
-	// 1. apply external forces
-	// 2. damp velocities
-	// 3. predict positions
-	// 4. generate collision constraints
-	// 5. iterate projections
-	// 6. update velocities from projected positions
-	// 7. apply post-collision velocity manipulation (friction)
-	// 8. commit positions
-	applyExternalForces(dt);
-	dampVelocities();
-	predictPositions(dt);
-	generateCollisionConstraints();
-
-	for (unsigned int iteration = 0; iteration < solverIterations; ++iteration) {
-		projectConstraints(persistentConstraints);
-		projectConstraints(generatedCollisionConstraints);
-	}
-	applySphereContactDamping(p, x, invMass, sphereColliders, collisionEps);
-	updateSelfCollisionDebugStats(p, true);
-
-	updateVelocities(dt);
-	applyPlaneContactVelocityDamping();
-	commitPositions();
-}
-
-void PBDSolver::solve(unsigned int n) {
-	// Wrapper used by the app to override the number of constraint-projection
-	// iterations for a single simulation time step.
-	//
-	// Important: n is NOT the number of outer time steps. This function still
-	// advances the simulation by exactly one dt via step(system->time_step).
-	// Instead, n temporarily replaces solverIterations, which controls the
-	// inner PBD loop inside step():
-	//   for each solver iteration:
-	//     project persistent constraints
-	//     project generated collision constraints
-	//
-	// After that one step is finished, the previous default iteration count is
-	// restored. This lets the caller choose the quality/cost of one frame update
-	// without permanently changing solver configuration.
-	const unsigned int previousIterations = solverIterations;
-	solverIterations = n;
-	step(system->time_step);
-	solverIterations = previousIterations;
-}
-
-void PBDSolver::pinPoint(unsigned int i) {
-	fixPoint(i);
-}
-
-void PBDSolver::fixPoint(unsigned int i) {
-	if (i >= x.size()) return;
-
-	const Vector3f fixedPosition(
-		vbuff[3 * i + 0],
-		vbuff[3 * i + 1],
-		vbuff[3 * i + 2]
-	);
-
-	// Mouse dragging acts like a moving fixed point. If the point is already
-	// fixed, only update its target position. Otherwise add a new persistent
-	// fixed-point constraint.
-	auto existing = fixedPointConstraints.find(i);
-	if (existing != fixedPointConstraints.end()) {
-		existing->second->setFixedPosition(fixedPosition);
-	}
-	else {
-		auto constraint = std::make_unique<FixedPointConstraint>(i, fixedPosition, 1.0f);
-		fixedPointConstraints[i] = constraint.get();
-		persistentConstraints.push_back(std::move(constraint));
-	}
-
-	// Mark the point as immovable for all other constraints.
-	x[i] = fixedPosition;
-	p[i] = fixedPosition;
-	v[i] = Vector3f(0.0f, 0.0f, 0.0f);
-	invMass[i] = 0.0f;
-}
-
-void PBDSolver::releasePoint(unsigned int i) {
-	if (i >= x.size()) return;
-
-	auto existing = fixedPointConstraints.find(i);
-	if (existing == fixedPointConstraints.end()) return;
-
-	FixedPointConstraint* target = existing->second;
-	fixedPointConstraints.erase(existing);
-
-	persistentConstraints.erase(
-		std::remove_if(
-			persistentConstraints.begin(),
-			persistentConstraints.end(),
-			[target](const ConstraintPtr& constraint) { return constraint.get() == target; }
-		),
-		persistentConstraints.end()
-	);
-
-	const float mass = system->masses[i];
-	invMass[i] = (mass > 0.0f) ? (1.0f / mass) : 0.0f;
-}
-
-void PBDSolver::addSphereCollider(const Vector3f& center, float radius) {
-	// Store persistent collision geometry. Actual contact constraints are
-	// generated each step from predicted positions.
-	sphereColliders.push_back(SphereCollider{ center, radius });
-}
-
-void PBDSolver::addPlaneCollider(const Vector3f& point, const Vector3f& normal) {
-	const float normalLength = normal.norm();
-	if (normalLength <= 1e-8f) return;
-	planeColliders.push_back(PlaneCollider{ point, normal / normalLength });
-}
-
-void PBDSolver::addDistanceConstraints(
-	const std::vector<unsigned int>& indices,
-	float stiffness,
-	std::vector<PBDConstraint*>* constraintGroup
-) {
-	for (unsigned int index : indices) {
-		if (index >= system->spring_list.size()) continue;
-
-		const Edge& edge = system->spring_list[index];
-		auto constraint = std::make_unique<DistanceConstraint>(
-			edge.first,
-			edge.second,
-			system->rest_lengths[index],
-			stiffness
-		);
-		if (constraintGroup != nullptr) {
-			constraintGroup->push_back(constraint.get());
-		}
-		persistentConstraints.push_back(std::move(constraint));
-	}
-}
-
-void PBDSolver::addDihedralBendConstraints(float stiffness) {
-	if (system->triangle_indices.size() < 6 || system->triangle_indices.size() % 3 != 0) return;
-
-	std::unordered_map<SharedEdgeKey, PendingTriangleEdge, SharedEdgeKeyHash> pendingEdges;
-	pendingEdges.reserve(system->triangle_indices.size());
-
-	// Build one bending constraint per interior mesh edge. Each triangle is read
-	// from the render mesh index buffer, and when the same undirected edge is
-	// seen a second time we have found the adjacent triangle pair required by the
-	// paper's 4-particle dihedral constraint.
-	for (std::size_t triangle = 0; triangle < system->triangle_indices.size(); triangle += 3) {
-		const std::array<unsigned int, 3> vertices = {
-			system->triangle_indices[triangle + 0],
-			system->triangle_indices[triangle + 1],
-			system->triangle_indices[triangle + 2]
-		};
-
-		for (int edgeIndex = 0; edgeIndex < 3; ++edgeIndex) {
-			const unsigned int edge0 = vertices[edgeIndex];
-			const unsigned int edge1 = vertices[(edgeIndex + 1) % 3];
-			const unsigned int opposite = vertices[(edgeIndex + 2) % 3];
-
-			SharedEdgeKey key{ std::min(edge0, edge1), std::max(edge0, edge1) };
-			auto existing = pendingEdges.find(key);
-			if (existing == pendingEdges.end()) {
-				pendingEdges.emplace(key, PendingTriangleEdge{ edge0, edge1, opposite });
-				continue;
-			}
-
-			const PendingTriangleEdge firstTriangle = existing->second;
-			pendingEdges.erase(existing);
-
-			bool valid = false;
-			// The rest angle theta_0 is taken from the initial cloth configuration,
-			// so the solver preserves the reference fold across this shared edge.
-			const float restAngle = dihedralAngleFromPositions(
-				x,
-				firstTriangle.edge0,
-				firstTriangle.edge1,
-				firstTriangle.opposite,
-				opposite,
-				&valid
-			);
-			if (!valid) continue;
-
-			auto constraint = std::make_unique<DihedralBendConstraint>(
-				firstTriangle.edge0,
-				firstTriangle.edge1,
-				firstTriangle.opposite,
-				opposite,
-				restAngle,
-				stiffness
-			);
-			bendConstraints.push_back(constraint.get());
-			persistentConstraints.push_back(std::move(constraint));
-		}
-	}
-}
-
-void PBDSolver::addStructuralConstraints(const std::vector<unsigned int>& indices, float stiffness) {
-	structuralStiffness = std::max(0.0f, std::min(1.0f, stiffness));
-	addDistanceConstraints(indices, structuralStiffness, &structuralConstraints);
-}
-
-void PBDSolver::addShearConstraints(const std::vector<unsigned int>& indices, float stiffness) {
-	shearStiffness = std::max(0.0f, std::min(1.0f, stiffness));
-	addDistanceConstraints(indices, shearStiffness, &shearConstraints);
-}
-
-void PBDSolver::addBendConstraints(const std::vector<unsigned int>&, float stiffness) {
-	// Bending is generated from adjacent triangle pairs rather than from longer
-	// spring edges. This measures the cloth's fold angle directly and therefore
-	// remains meaningful even when in-plane stretching changes edge lengths.
-	bendStiffness = std::max(0.0f, std::min(1.0f, stiffness));
-	addDihedralBendConstraints(bendStiffness);
-
-
-	// addDistanceConstraints(indices, stiffness); for distance-based bending --- IGNORE ---
 }
 
 void PBDSolver::setGravity(float gravityMagnitude) {
@@ -1471,29 +1479,57 @@ unsigned int PBDSolver::getMaxSelfCollisionContactsPerVertex() const {
 	return maxSelfCollisionContactsPerVertex;
 }
 
-void PBDSolver::applyPlaneContactVelocityDamping() {
-	if (planeContactSignedDistances.empty()) return;
+// -----------------------------
+// 8. Debug / Diagnostics
+// -----------------------------
 
-	const float friction = std::max(0.0f, std::min(1.0f, planeFriction));
-	const float tangentialSleepSpeed = velocitySleepThreshold;
-	for (unsigned int i = 0; i < v.size() && i < invMass.size()
-		&& i < planeContactSignedDistances.size()
-		&& i < planeContactNormals.size(); ++i) {
-		if (invMass[i] == 0.0f) continue;
-		if (!std::isfinite(planeContactSignedDistances[i])) continue;
-
-		const Vector3f& contactNormal = planeContactNormals[i];
-		const float normalSpeed = v[i].dot(contactNormal);
-		const float separatingSpeed = std::max(0.0f, normalSpeed);
-		const Vector3f normalVelocity = separatingSpeed * contactNormal;
-		Vector3f tangentialVelocity = v[i] - normalSpeed * contactNormal;
-		if (friction > 0.0f) {
-			tangentialVelocity *= (1.0f - friction);
-		}
-		if (tangentialVelocity.norm() <= tangentialSleepSpeed) {
-			tangentialVelocity = Vector3f::Zero();
-		}
-
-		v[i] = normalVelocity + tangentialVelocity;
+void PBDSolver::updateSelfCollisionDebugStats(const std::vector<Vector3f>& positions, bool afterProjection) {
+	if (!afterProjection) {
+		selfCollisionDebugStats.generatedContacts = static_cast<unsigned int>(generatedSelfCollisionConstraints.size());
+		selfCollisionDebugStats.initiallyViolatedContacts = 0u;
+		selfCollisionDebugStats.maxInitialPenetration = 0.0f;
 	}
+	else {
+		selfCollisionDebugStats.remainingViolatedContacts = 0u;
+		selfCollisionDebugStats.maxRemainingPenetration = 0.0f;
+	}
+
+	for (const CollisionConstraint* constraint : generatedSelfCollisionConstraints) {
+		if (constraint == nullptr) continue;
+		const float value = constraint->evaluate(positions);
+		if (value >= 0.0f) continue;
+
+		const float penetration = -value;
+		if (!afterProjection) {
+			++selfCollisionDebugStats.initiallyViolatedContacts;
+			selfCollisionDebugStats.maxInitialPenetration = std::max(selfCollisionDebugStats.maxInitialPenetration, penetration);
+		}
+		else {
+			++selfCollisionDebugStats.remainingViolatedContacts;
+			selfCollisionDebugStats.maxRemainingPenetration = std::max(selfCollisionDebugStats.maxRemainingPenetration, penetration);
+		}
+	}
+}
+
+// -----------------------------
+// 9. Rendering / Buffer Synchronization
+// -----------------------------
+
+void PBDSolver::writeBackToVBuff() {
+	const unsigned int n = system->n_points;
+
+	for (unsigned int i = 0; i < n; ++i) {
+		vbuff[3 * i + 0] = x[i][0];    // x
+		vbuff[3 * i + 1] = x[i][1];    // y
+		vbuff[3 * i + 2] = x[i][2];    // z
+	}
+}
+
+void PBDSolver::commitPositions() {
+	const unsigned int n = system->n_points;
+	for (unsigned int i = 0; i < n; ++i) {
+		x[i] = p[i];
+	}
+
+	writeBackToVBuff();
 }

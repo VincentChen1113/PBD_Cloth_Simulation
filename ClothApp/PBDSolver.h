@@ -285,45 +285,84 @@ private:
 	float velocitySleepThreshold;
 	Vector3f gravity;
 
-	// internal steps
+	// -----------------------------
+	// 1. Constructor / Initialization
+	// -----------------------------
 	void initializeState();
-	void writeBackToVBuff();
 
+	// -----------------------------
+	// 3. Core PBD Pipeline Stages
+	// -----------------------------
 	void applyExternalForces(float dt);
 	void dampVelocities();
 	void predictPositions(float dt);
-	void generateCollisionConstraints();
-	void generateSelfCollisionConstraints();
 	void projectConstraints(const ConstraintList& constraints);
-	void updateSelfCollisionDebugStats(const std::vector<Vector3f>& positions, bool afterProjection);
-	void setConstraintGroupStiffness(const std::vector<PBDConstraint*>& constraints, float stiffness);
+	void updateVelocities(float dt);
+
+	// -----------------------------
+	// 5. Collision Handling
+	// -----------------------------
+	void generateCollisionConstraints();
 	void applyPlaneContactVelocityDamping();
 
-	void updateVelocities(float dt);
-	void commitPositions();
+	// -----------------------------
+	// 6. Self-Collision Utilities / Helpers
+	// -----------------------------
+	void generateSelfCollisionConstraints();
 
+	// -----------------------------
+	// 4. Persistent Constraint Setup / Constraint Construction
+	// -----------------------------
 	void addDistanceConstraints(
 		const std::vector<unsigned int>& indices,
 		float stiffness,
 		std::vector<PBDConstraint*>* constraintGroup = nullptr
 	);
 	void addDihedralBendConstraints(float stiffness);
+	void setConstraintGroupStiffness(const std::vector<PBDConstraint*>& constraints, float stiffness);
+
+	// -----------------------------
+	// 8. Debug / Diagnostics
+	// -----------------------------
+	void updateSelfCollisionDebugStats(const std::vector<Vector3f>& positions, bool afterProjection);
+
+	// -----------------------------
+	// 9. Rendering / Buffer Synchronization
+	// -----------------------------
+	void writeBackToVBuff();
+	void commitPositions();
 
 public:
+	// -----------------------------
+	// 1. Constructor / Initialization
+	// -----------------------------
 	PBDSolver(pbd_system* system, float* vbuff);
 
-	// one simulation step
+	// -----------------------------
+	// 2. Main Simulation Entry / Solver Loop
+	// -----------------------------
 	void step(float dt);
-
-	// optional compatibility wrapper
 	void solve(unsigned int n);
 
-	// setup helpers
+	// -----------------------------
+	// 4. Persistent Constraint Setup / Constraint Construction
+	// -----------------------------
 	void pinPoint(unsigned int i);
 	virtual void fixPoint(unsigned int i) override;
 	virtual void releasePoint(unsigned int i) override;
+	void addStructuralConstraints(const std::vector<unsigned int>& indices, float stiffness = 1.0f);
+	void addShearConstraints(const std::vector<unsigned int>& indices, float stiffness = 1.0f);
+	void addBendConstraints(const std::vector<unsigned int>& indices, float stiffness = 1.0f);
+
+	// -----------------------------
+	// 5. Collision Handling
+	// -----------------------------
 	void addSphereCollider(const Vector3f& center, float radius);
 	void addPlaneCollider(const Vector3f& point, const Vector3f& normal);
+
+	// -----------------------------
+	// 7. Parameter / Tuning Interface
+	// -----------------------------
 	void setGravity(float gravityMagnitude);
 	float getGravity() const;
 	void setDampingFactor(float damping);
@@ -350,14 +389,16 @@ public:
 	void setMaxSelfCollisionContactsPerVertex(unsigned int maxContacts);
 	unsigned int getMaxSelfCollisionContactsPerVertex() const;
 
-	// build constraint lists from builder indices
-	void addStructuralConstraints(const std::vector<unsigned int>& indices, float stiffness = 1.0f);
-	void addShearConstraints(const std::vector<unsigned int>& indices, float stiffness = 1.0f);
-	void addBendConstraints(const std::vector<unsigned int>& indices, float stiffness = 1.0f);
+	// -----------------------------
+	// 8. Debug / Diagnostics
+	// -----------------------------
+	const SelfCollisionDebugStats& getSelfCollisionDebugStats() const { return selfCollisionDebugStats; }
 
+	// -----------------------------
+	// 9. Rendering / Buffer Synchronization
+	// -----------------------------
 	// accessors
 	std::vector<Vector3f>& getPositions() { return x; }
 	std::vector<Vector3f>& getPredictedPositions() { return p; }
 	std::vector<Vector3f>& getVelocities() { return v; }
-	const SelfCollisionDebugStats& getSelfCollisionDebugStats() const { return selfCollisionDebugStats; }
 };

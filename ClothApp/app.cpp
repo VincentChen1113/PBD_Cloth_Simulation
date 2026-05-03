@@ -93,7 +93,7 @@ namespace SystemParam {
 
 // System parameters for PBD
 namespace PBDSystemParam {
-	static const int n = 21; // must be odd, n * n = n_vertices
+	static const int n = 33; // must be odd, n * n = n_vertices
 	static const float w = 2.0f; // cloth width
 	static const float h = 0.008f; // time step
 	static const float r = w / (n - 1); // rest length

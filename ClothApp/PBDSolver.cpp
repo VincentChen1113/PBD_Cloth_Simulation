@@ -257,6 +257,212 @@ bool segmentPlaneContactPoint(
 	float previousSignedDistance,
 	float predictedSignedDistance,
 	Eigen::Vector3f& outContactPoint
+);
+
+bool pointInsideBox(
+	const Eigen::Vector3f& point,
+	const Eigen::Vector3f& center,
+	const Eigen::Vector3f& halfExtents
+) {
+	const Eigen::Vector3f local = point - center;
+	const Eigen::Vector3f absLocal = local.cwiseAbs();
+	return absLocal.x() <= halfExtents.x()
+		&& absLocal.y() <= halfExtents.y()
+		&& absLocal.z() <= halfExtents.z();
+}
+
+struct BoxFaceContact {
+	Eigen::Vector3f point;
+	Eigen::Vector3f normal;
+	float signedDistance;
+	float penetrationDepth;
+};
+
+std::vector<BoxFaceContact> boxFaceContacts(
+	const Eigen::Vector3f& point,
+	const Eigen::Vector3f& center,
+	const Eigen::Vector3f& halfExtents,
+	float edgeCornerTolerance
+) {
+	std::vector<BoxFaceContact> contacts;
+	if (!pointInsideBox(point, center, halfExtents)) {
+		return contacts;
+	}
+
+	const Eigen::Vector3f normals[6] = {
+		Eigen::Vector3f(1.0f, 0.0f, 0.0f),
+		Eigen::Vector3f(-1.0f, 0.0f, 0.0f),
+		Eigen::Vector3f(0.0f, 1.0f, 0.0f),
+		Eigen::Vector3f(0.0f, -1.0f, 0.0f),
+		Eigen::Vector3f(0.0f, 0.0f, 1.0f),
+		Eigen::Vector3f(0.0f, 0.0f, -1.0f)
+	};
+	const Eigen::Vector3f planePoints[6] = {
+		center + Eigen::Vector3f(halfExtents.x(), 0.0f, 0.0f),
+		center - Eigen::Vector3f(halfExtents.x(), 0.0f, 0.0f),
+		center + Eigen::Vector3f(0.0f, halfExtents.y(), 0.0f),
+		center - Eigen::Vector3f(0.0f, halfExtents.y(), 0.0f),
+		center + Eigen::Vector3f(0.0f, 0.0f, halfExtents.z()),
+		center - Eigen::Vector3f(0.0f, 0.0f, halfExtents.z())
+	};
+
+	std::array<BoxFaceContact, 6> candidates;
+	float minimumPenetration = std::numeric_limits<float>::infinity();
+	for (int faceIndex = 0; faceIndex < 6; ++faceIndex) {
+		const float signedDistance = (point - planePoints[faceIndex]).dot(normals[faceIndex]);
+		const float penetrationDepth = -signedDistance;
+		candidates[faceIndex] = BoxFaceContact{
+			planePoints[faceIndex],
+			normals[faceIndex],
+			signedDistance,
+			penetrationDepth
+		};
+		minimumPenetration = std::min(minimumPenetration, penetrationDepth);
+	}
+
+	for (const BoxFaceContact& candidate : candidates) {
+		if (candidate.penetrationDepth <= minimumPenetration + edgeCornerTolerance) {
+			contacts.push_back(candidate);
+		}
+	}
+
+	return contacts;
+}
+
+Eigen::Vector3f closestPointOnBox(
+	const Eigen::Vector3f& point,
+	const Eigen::Vector3f& center,
+	const Eigen::Vector3f& halfExtents
+) {
+	const Eigen::Vector3f boxMin = center - halfExtents;
+	const Eigen::Vector3f boxMax = center + halfExtents;
+	return point.cwiseMax(boxMin).cwiseMin(boxMax);
+}
+
+std::vector<BoxFaceContact> closestPointBoxContacts(
+	const Eigen::Vector3f& point,
+	const Eigen::Vector3f& center,
+	const Eigen::Vector3f& halfExtents,
+	float proximityTolerance,
+	float collisionEps
+) {
+	std::vector<BoxFaceContact> contacts;
+	if (pointInsideBox(point, center, halfExtents)) {
+		return contacts;
+	}
+
+	const Eigen::Vector3f closestPoint = closestPointOnBox(point, center, halfExtents);
+	Eigen::Vector3f normal = point - closestPoint;
+	float distance = normal.norm();
+	if (distance > proximityTolerance) {
+		return contacts;
+	}
+
+	if (distance <= 1e-8f) {
+		const Eigen::Vector3f local = point - center;
+		int dominantAxis = 0;
+		if (std::abs(local.y()) > std::abs(local[dominantAxis])) dominantAxis = 1;
+		if (std::abs(local.z()) > std::abs(local[dominantAxis])) dominantAxis = 2;
+		normal = Eigen::Vector3f::Zero();
+		normal[dominantAxis] = (local[dominantAxis] >= 0.0f) ? 1.0f : -1.0f;
+		distance = 0.0f;
+	}
+	else {
+		normal /= distance;
+	}
+
+	const Eigen::Vector3f contactPlanePoint = closestPoint + proximityTolerance * normal;
+	const float signedDistance = (point - contactPlanePoint).dot(normal);
+	if (signedDistance > collisionEps) {
+		return contacts;
+	}
+
+	contacts.push_back(BoxFaceContact{
+		contactPlanePoint,
+		normal,
+		signedDistance,
+		-std::min(signedDistance, 0.0f)
+	});
+	return contacts;
+}
+
+std::vector<BoxFaceContact> sweptBoxFaceContacts(
+	const Eigen::Vector3f& previousPosition,
+	const Eigen::Vector3f& predictedPosition,
+	const Eigen::Vector3f& center,
+	const Eigen::Vector3f& halfExtents,
+	float faceBoundsTolerance,
+	float collisionEps
+) {
+	std::vector<BoxFaceContact> contacts;
+	const Eigen::Vector3f normals[6] = {
+		Eigen::Vector3f(1.0f, 0.0f, 0.0f),
+		Eigen::Vector3f(-1.0f, 0.0f, 0.0f),
+		Eigen::Vector3f(0.0f, 1.0f, 0.0f),
+		Eigen::Vector3f(0.0f, -1.0f, 0.0f),
+		Eigen::Vector3f(0.0f, 0.0f, 1.0f),
+		Eigen::Vector3f(0.0f, 0.0f, -1.0f)
+	};
+	const Eigen::Vector3f planePoints[6] = {
+		center + Eigen::Vector3f(halfExtents.x(), 0.0f, 0.0f),
+		center - Eigen::Vector3f(halfExtents.x(), 0.0f, 0.0f),
+		center + Eigen::Vector3f(0.0f, halfExtents.y(), 0.0f),
+		center - Eigen::Vector3f(0.0f, halfExtents.y(), 0.0f),
+		center + Eigen::Vector3f(0.0f, 0.0f, halfExtents.z()),
+		center - Eigen::Vector3f(0.0f, 0.0f, halfExtents.z())
+	};
+
+	for (int faceIndex = 0; faceIndex < 6; ++faceIndex) {
+		const Eigen::Vector3f& planePoint = planePoints[faceIndex];
+		const Eigen::Vector3f& planeNormal = normals[faceIndex];
+		const float previousSignedDistance = (previousPosition - planePoint).dot(planeNormal);
+		const float predictedSignedDistance = (predictedPosition - planePoint).dot(planeNormal);
+		const bool crossedFace = previousSignedDistance > collisionEps && predictedSignedDistance < 0.0f;
+		if (!crossedFace) continue;
+
+		Eigen::Vector3f contactPoint = Eigen::Vector3f::Zero();
+		if (!segmentPlaneContactPoint(
+			previousPosition,
+			predictedPosition,
+			planePoint,
+			planeNormal,
+			previousSignedDistance,
+			predictedSignedDistance,
+			contactPoint
+		)) {
+			continue;
+		}
+
+		const Eigen::Vector3f local = contactPoint - center;
+		bool insideFaceBounds = true;
+		for (int axis = 0; axis < 3; ++axis) {
+			if (std::abs(planeNormal[axis]) > 0.5f) continue;
+			if (std::abs(local[axis]) > halfExtents[axis] + faceBoundsTolerance) {
+				insideFaceBounds = false;
+				break;
+			}
+		}
+		if (!insideFaceBounds) continue;
+
+		contacts.push_back(BoxFaceContact{
+			contactPoint,
+			planeNormal,
+			predictedSignedDistance,
+			-std::min(predictedSignedDistance, 0.0f)
+		});
+	}
+
+	return contacts;
+}
+
+bool segmentPlaneContactPoint(
+	const Eigen::Vector3f& previousPosition,
+	const Eigen::Vector3f& predictedPosition,
+	const Eigen::Vector3f& planePoint,
+	const Eigen::Vector3f& planeNormal,
+	float previousSignedDistance,
+	float predictedSignedDistance,
+	Eigen::Vector3f& outContactPoint
 ) {
 	const float denominator = previousSignedDistance - predictedSignedDistance;
 	if (std::abs(denominator) <= 1e-8f) {
@@ -662,6 +868,25 @@ CollisionConstraint::CollisionConstraint(
 	  radius(0.0f),
 	  offset(0.0f),
 	  planeNormal(planeNormal.normalized()),
+	  edgeSampleWeights(Eigen::Vector2f::Zero()),
+	  selfCollisionNormal(Eigen::Vector3f::Zero()),
+	  selfCollisionBarycentric(Eigen::Vector3f::Zero()) {}
+
+CollisionConstraint::CollisionConstraint(
+	unsigned int edge0,
+	unsigned int edge1,
+	const Eigen::Vector2f& weights,
+	const Eigen::Vector3f& planePoint,
+	const Eigen::Vector3f& planeNormal,
+	float stiffness
+)
+	: PBDConstraint(std::vector<unsigned int>{ edge0, edge1 }, stiffness, PBDConstraintType::Inequality),
+	  collisionKind(CollisionKind::EdgePlane),
+	  center(planePoint),
+	  radius(0.0f),
+	  offset(0.0f),
+	  planeNormal(planeNormal.normalized()),
+	  edgeSampleWeights(weights),
 	  selfCollisionNormal(Eigen::Vector3f::Zero()),
 	  selfCollisionBarycentric(Eigen::Vector3f::Zero()) {}
 
@@ -699,6 +924,13 @@ float CollisionConstraint::evaluate(const std::vector<Vector3f>& positions) cons
 		return (positions[particleIndices[0]] - center).dot(planeNormal);
 	}
 
+	if (collisionKind == CollisionKind::EdgePlane) {
+		if (particleIndices.size() != 2) return 0.0f;
+		const Vector3f samplePoint = edgeSampleWeights[0] * positions[particleIndices[0]]
+			+ edgeSampleWeights[1] * positions[particleIndices[1]];
+		return (samplePoint - center).dot(planeNormal);
+	}
+
 	if (particleIndices.size() != 4) return 0.0f;
 
 	const Vector3f& q = positions[particleIndices[0]];
@@ -731,6 +963,13 @@ void CollisionConstraint::gradients(
 	if (collisionKind == CollisionKind::Plane) {
 		outGradients.assign(1, Vector3f::Zero());
 		outGradients[0] = planeNormal;
+		return;
+	}
+
+	if (collisionKind == CollisionKind::EdgePlane) {
+		outGradients.assign(2, Vector3f::Zero());
+		outGradients[0] = edgeSampleWeights[0] * planeNormal;
+		outGradients[1] = edgeSampleWeights[1] * planeNormal;
 		return;
 	}
 
@@ -1178,6 +1417,126 @@ void PBDSolver::generateCollisionConstraints() {
 		}
 	}
 
+	for (const BoxCollider& collider : boxColliders) {
+		const Vector3f expandedHalfExtents = collider.halfExtents
+			+ Vector3f::Constant(std::max(selfCollisionThickness, collisionEps));
+		const float edgeCornerTolerance = std::max(collisionEps, 0.5f * selfCollisionThickness);
+		const float sweptFaceBoundsTolerance = std::max(collisionEps, selfCollisionThickness);
+		const float closestPointTolerance = std::max(collisionEps, selfCollisionThickness);
+
+		for (unsigned int i = 0; i < system->n_points; ++i) {
+			if (invMass[i] == 0.0f) continue;
+
+			std::vector<BoxFaceContact> contacts = boxFaceContacts(
+				p[i],
+				collider.center,
+				expandedHalfExtents,
+				edgeCornerTolerance
+			);
+			if (contacts.empty()) {
+				contacts = sweptBoxFaceContacts(
+					x[i],
+					p[i],
+					collider.center,
+					expandedHalfExtents,
+					sweptFaceBoundsTolerance,
+					collisionEps
+				);
+			}
+			if (contacts.empty()) {
+				contacts = closestPointBoxContacts(
+					p[i],
+					collider.center,
+					expandedHalfExtents,
+					closestPointTolerance,
+					collisionEps
+				);
+			}
+			if (contacts.empty()) {
+				continue;
+			}
+
+			for (const BoxFaceContact& contact : contacts) {
+				if (contact.signedDistance < planeContactSignedDistances[i]) {
+					planeContactSignedDistances[i] = contact.signedDistance;
+					planeContactPoints[i] = contact.point;
+					planeContactNormals[i] = contact.normal;
+				}
+
+				generatedCollisionConstraints.push_back(
+					std::make_unique<CollisionConstraint>(
+						i,
+						contact.point,
+						contact.normal,
+						PBDDefaultParam::collisionStiffness
+					)
+				);
+			}
+		}
+
+		const Eigen::Vector2f midpointWeights(0.5f, 0.5f);
+		for (const Edge& edge : system->spring_list) {
+			if (edge.first >= p.size() || edge.second >= p.size()) continue;
+			if (edge.first >= x.size() || edge.second >= x.size()) continue;
+			const float edgeInvMass = invMass[edge.first] + invMass[edge.second];
+			if (edgeInvMass <= 0.0f) continue;
+
+			const Vector3f predictedMidpoint = 0.5f * (p[edge.first] + p[edge.second]);
+			const Vector3f previousMidpoint = 0.5f * (x[edge.first] + x[edge.second]);
+
+			std::vector<BoxFaceContact> contacts = boxFaceContacts(
+				predictedMidpoint,
+				collider.center,
+				expandedHalfExtents,
+				edgeCornerTolerance
+			);
+			if (contacts.empty()) {
+				contacts = sweptBoxFaceContacts(
+					previousMidpoint,
+					predictedMidpoint,
+					collider.center,
+					expandedHalfExtents,
+					sweptFaceBoundsTolerance,
+					collisionEps
+				);
+			}
+			if (contacts.empty()) {
+				contacts = closestPointBoxContacts(
+					predictedMidpoint,
+					collider.center,
+					expandedHalfExtents,
+					closestPointTolerance,
+					collisionEps
+				);
+			}
+			if (contacts.empty()) continue;
+
+			for (const BoxFaceContact& contact : contacts) {
+				if (contact.signedDistance < planeContactSignedDistances[edge.first]) {
+					planeContactSignedDistances[edge.first] = contact.signedDistance;
+					planeContactPoints[edge.first] = contact.point;
+					planeContactNormals[edge.first] = contact.normal;
+				}
+				if (contact.signedDistance < planeContactSignedDistances[edge.second]) {
+					planeContactSignedDistances[edge.second] = contact.signedDistance;
+					planeContactPoints[edge.second] = contact.point;
+					planeContactNormals[edge.second] = contact.normal;
+				}
+
+				generatedCollisionConstraints.push_back(
+					std::make_unique<CollisionConstraint>(
+						edge.first,
+						edge.second,
+						midpointWeights,
+						contact.point,
+						contact.normal,
+						PBDDefaultParam::collisionStiffness
+					)
+				);
+			}
+		}
+	}
+
 	for (const PlaneCollider& collider : planeColliders) {
 		for (unsigned int i = 0; i < system->n_points; ++i) {
 			if (invMass[i] == 0.0f) continue;
@@ -1233,6 +1592,11 @@ void PBDSolver::addSphereCollider(const Vector3f& center, float radius) {
 	// Store persistent collision geometry. Actual contact constraints are
 	// generated each step from predicted positions.
 	sphereColliders.push_back(SphereCollider{ center, radius });
+}
+
+void PBDSolver::addBoxCollider(const Vector3f& center, const Vector3f& halfExtents) {
+	if (halfExtents.x() <= 0.0f || halfExtents.y() <= 0.0f || halfExtents.z() <= 0.0f) return;
+	boxColliders.push_back(BoxCollider{ center, halfExtents });
 }
 
 void PBDSolver::addPlaneCollider(const Vector3f& point, const Vector3f& normal) {

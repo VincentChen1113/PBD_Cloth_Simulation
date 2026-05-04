@@ -64,8 +64,8 @@ public:
 
 class PhongShader : public GLProgram {
 private:
-	// Albedo | Ambient Light | Light Direction
-	GLuint uAlbedo, uAmbient, uLight;
+	// Albedo | Ambient Light | Light Direction | Specular Strength | Shininess
+	GLuint uAlbedo, uAmbient, uLight, uSpecularStrength, uShininess;
 
 public:
 	PhongShader();
@@ -73,6 +73,18 @@ public:
 	void setAlbedo(const glm::vec3& albedo);
 	void setAmbient(const glm::vec3& ambient);
 	void setLight(const glm::vec3& light);
+	void setSpecularStrength(float strength);
+	void setShininess(float shininess);
+};
+
+class ShadowShader : public GLProgram {
+private:
+	GLuint uShadowColor;
+
+public:
+	ShadowShader();
+	virtual void postLink();
+	void setShadowColor(const glm::vec4& color);
 };
 
 

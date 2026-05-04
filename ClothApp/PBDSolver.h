@@ -152,6 +152,11 @@ struct PlaneCollider {
 	Eigen::Vector3f normal;
 };
 
+struct BoxCollider {
+	Eigen::Vector3f center;
+	Eigen::Vector3f halfExtents;
+};
+
 // Generated collision constraint:
 // - sphere contact:          C(p_i) = |p_i - c| - r
 // - plane/static contact:    C(p_i) = (p_i - q_c) . n_c
@@ -162,6 +167,7 @@ private:
 	enum class CollisionKind {
 		Sphere,
 		Plane,
+		EdgePlane,
 		SelfVertexTriangle
 	};
 
@@ -170,6 +176,7 @@ private:
 	float radius;
 	float offset;
 	Eigen::Vector3f planeNormal;
+	Eigen::Vector2f edgeSampleWeights;
 	Eigen::Vector3f selfCollisionNormal;
 	Eigen::Vector3f selfCollisionBarycentric;
 
@@ -183,6 +190,14 @@ public:
 	CollisionConstraint(unsigned int i, const Eigen::Vector3f& center, float radius, float stiffness = 1.0f);
 	CollisionConstraint(
 		unsigned int i,
+		const Eigen::Vector3f& planePoint,
+		const Eigen::Vector3f& planeNormal,
+		float stiffness = 1.0f
+	);
+	CollisionConstraint(
+		unsigned int edge0,
+		unsigned int edge1,
+		const Eigen::Vector2f& weights,
 		const Eigen::Vector3f& planePoint,
 		const Eigen::Vector3f& planeNormal,
 		float stiffness = 1.0f
@@ -261,6 +276,7 @@ private:
 	// Collision primitives persist, but actual collision constraints are generated
 	// fresh each step from the predicted positions x -> p.
 	std::vector<SphereCollider> sphereColliders;
+	std::vector<BoxCollider> boxColliders;
 	std::vector<PlaneCollider> planeColliders;
 	ConstraintList generatedCollisionConstraints;
 	std::vector<CollisionConstraint*> generatedSelfCollisionConstraints;
@@ -361,6 +377,7 @@ public:
 	// 5. Collision Handling
 	// -----------------------------
 	void addSphereCollider(const Vector3f& center, float radius);
+	void addBoxCollider(const Vector3f& center, const Vector3f& halfExtents);
 	void addPlaneCollider(const Vector3f& point, const Vector3f& normal);
 
 	// -----------------------------

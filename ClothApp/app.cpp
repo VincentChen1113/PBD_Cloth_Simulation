@@ -31,6 +31,8 @@ static Renderer* g_pickRenderer;
 static ProgramInput* g_floor_target;
 static ProgramInput* g_sphere_target;
 static unsigned int g_sphere_index_count = 0u;
+static ProgramInput* g_cube_target;
+static unsigned int g_cube_index_count = 0u;
 
 // Constants
 static const float PI = glm::pi<float>();
@@ -38,12 +40,18 @@ static const glm::vec3 g_floor_albedo(0.55f, 0.55f, 0.58f);
 static const glm::vec3 g_floor_ambient(0.04f, 0.04f, 0.04f);
 static const glm::vec3 g_sphere_albedo(0.36f, 0.38f, 0.40f);
 static const glm::vec3 g_sphere_ambient(0.05f, 0.05f, 0.05f);
+static const glm::vec3 g_cube_albedo(0.36f, 0.38f, 0.40f);
+static const glm::vec3 g_cube_ambient(0.05f, 0.05f, 0.05f);
+static const float g_specular_strength = 0.28f;
+static const float g_shininess = 32.0f;
+static const glm::vec4 g_shadow_color(0.0f, 0.0f, 0.0f, 0.32f);
 static const float g_floor_collision_height = -1.75f;
 static const float g_floor_render_offset = -0.002f;
 static const float g_floor_extent = 3.5f;
 
 // Shader Handles
 static PhongShader* g_phongShader; // linked phong shader
+static ShadowShader* g_shadowShader; // linked shadow shader
 static PickShader* g_pickShader; // linked pick shader
 
 // Shader parameters
@@ -100,7 +108,7 @@ namespace SystemParam {
 
 // System parameters for PBD
 namespace PBDSystemParam {
-	static const int n = 55; // must be odd, n * n = n_vertices
+	static const int n = 33; // must be odd, n * n = n_vertices
 	static const float w = 2.0f; // cloth width
 	static const float h = 0.008f; // time step
 	static const float r = w / (n - 1); // rest length
@@ -111,9 +119,9 @@ namespace PBDSystemParam {
 	static const float a = 0.02f; // damping factor
 	static const float eps = 1e-4f; // collision epsilon
 	static const float k_stretch = 0.9f; // stretch stiffness | 1.0f
-	static const float k_shear = 0.65f; // shear stiffness | 0.8f
+	static const float k_shear = 0.5f; // shear stiffness | 0.8f
 	static const float k_bend = 0.01f; // bend stiffness | 0.01f
-	static const float sphere_radius = 0.64f;
+	static const float sphere_radius = 0.64f;  // radius of sphere collider in drop demo | 0.64f
 }
 
 namespace PBDFloorDemoParam {
@@ -138,24 +146,43 @@ static void initShaders(); // Read, compile and link shaders
 static void initCloth(); // Generate cloth mesh
 static void initFloor(); // Generate floor mesh
 static void initSphereColliderVisual(float radius, const glm::vec3& center); // Generate sphere collider mesh
+static void initCubeColliderVisual(const glm::vec3& center, const glm::vec3& halfExtents); // Generate cube collider mesh
 static void initScene(); // Generate scene matrices
 static void initMouseInteraction(FixedPointController*, unsigned int);
+static glm::mat4 floorShadowMatrix(float planeHeight, const glm::vec3& lightDirection);
 static void orientClothForFloorDrop();
+static void orientClothFlatForDualFloorDrop();
 static void logPBDSelfCollisionDiagnostics();
 static bool isPBDMode();
 static bool hasSphereColliderVisual();
+static bool hasCubeColliderVisual();
 static unsigned int activeGridSize();
 static float activeClothWidth();
 static pbd_system* buildPBDSystem(const mass_spring_system& system);
 
+struct AnalyticBoxDefinition {
+	glm::vec3 center;
+	glm::vec3 halfExtents;
+};
+
 // demos
+namespace PBDDualObstacleDemoParam {
+	static const glm::vec3 sphereCenter(0.42f, 0.0f, g_floor_collision_height + 0.30f);
+	static const float sphereRadius = 0.30f;
+	static const AnalyticBoxDefinition cube = {
+		glm::vec3(-0.42f, 0.0f, g_floor_collision_height + 0.44f),
+		glm::vec3(0.44f, 0.44f, 0.44f)
+	};
+}
+
 enum class SimMode {
 	MassSpringHang,
 	MassSpringDrop,
 	PBDHang,
 	PBDHangWind,
 	PBDDrop,
-	PBDDropFloor
+	PBDDropFloor,
+	PBDDropFloorDual
 };
 
 static SimMode g_mode = SimMode::MassSpringHang; // default to mass-spring hanging demo, switch to other demos later
@@ -166,18 +193,26 @@ static void demo_pbd_hang();
 static void demo_pbd_hang_wind();
 static void demo_pbd_drop();
 static void demo_pbd_drop_floor();
+static void demo_pbd_drop_floor_dual();
 static void(*g_demo)() = demo_hang;
 
 static bool isFloorDemo() {
-	return g_mode == SimMode::PBDDropFloor;
+	return g_mode == SimMode::PBDDropFloor || g_mode == SimMode::PBDDropFloorDual;
 }
 
 static bool hasSphereColliderVisual() {
-	return g_mode == SimMode::MassSpringDrop || g_mode == SimMode::PBDDrop;
+	return g_mode == SimMode::MassSpringDrop || g_mode == SimMode::PBDDrop || g_mode == SimMode::PBDDropFloorDual;
+}
+
+static bool hasCubeColliderVisual() {
+	return g_mode == SimMode::PBDDropFloorDual;
 }
 
 static void selectDemo() {
 	switch (g_mode) {
+	case SimMode::PBDDropFloorDual:
+		g_demo = demo_pbd_drop_floor_dual;
+		break;
 	case SimMode::MassSpringHang:
 		g_demo = demo_hang;
 		break;
@@ -207,6 +242,7 @@ static void motion(int, int);
 
 // draw cloth function
 static void drawFloor();
+static void drawFloorShadows();
 static void drawCloth();
 static void animateCloth(int value);
 
@@ -285,6 +321,11 @@ static void parseSimMode(int argc, char** argv) {
 		parseOptionalArgs(argc, argv, 2);
 		return;
 	}
+	if (arg1 == "pbd-drop-floor-dual") {
+		g_mode = SimMode::PBDDropFloorDual;
+		parseOptionalArgs(argc, argv, 2);
+		return;
+	}
 
 	if (argc >= 3) {
 		const std::string solver(argv[1]);
@@ -319,10 +360,15 @@ static void parseSimMode(int argc, char** argv) {
 			parseOptionalArgs(argc, argv, 3);
 			return;
 		}
+		if (solver == "pbd" && scene == "drop-floor-dual") {
+			g_mode = SimMode::PBDDropFloorDual;
+			parseOptionalArgs(argc, argv, 3);
+			return;
+		}
 	}
 
 	throw std::runtime_error(
-		"Usage: ./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug], ./fast-mass-spring pbd [hang|hang_wind|drop|drop-floor] [--self-thickness value] [--debug] [--wind-accel value], or ./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang_wind|pbd-drop|pbd-drop-floor] [--self-thickness value] [--debug] [--wind-accel value]"
+		"Usage: ./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug], ./fast-mass-spring pbd [hang|hang_wind|drop|drop-floor|drop-floor-dual] [--self-thickness value] [--debug] [--wind-accel value], or ./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang_wind|pbd-drop|pbd-drop-floor|pbd-drop-floor-dual] [--self-thickness value] [--debug] [--wind-accel value]"
 	);
 }
 
@@ -409,7 +455,8 @@ static bool isPBDMode() {
 	return g_mode == SimMode::PBDHang
 		|| g_mode == SimMode::PBDHangWind
 		|| g_mode == SimMode::PBDDrop
-		|| g_mode == SimMode::PBDDropFloor;
+		|| g_mode == SimMode::PBDDropFloor
+		|| g_mode == SimMode::PBDDropFloorDual;
 }
 
 static unsigned int activeGridSize() {
@@ -423,19 +470,24 @@ static float activeClothWidth() {
 static void initShaders() {
 	GLShader basic_vert(GL_VERTEX_SHADER);
 	GLShader phong_frag(GL_FRAGMENT_SHADER);
+	GLShader shadow_frag(GL_FRAGMENT_SHADER);
 	GLShader pick_frag(GL_FRAGMENT_SHADER);
 
 	auto ibasic = std::ifstream("./shaders/basic.vshader");
 	auto iphong = std::ifstream("./shaders/phong.fshader");
+	auto ishadow = std::ifstream("./shaders/shadow.fshader");
 	auto ifrag = std::ifstream("./shaders/pick.fshader");
 
 	basic_vert.compile(ibasic);
 	phong_frag.compile(iphong);
+	shadow_frag.compile(ishadow);
 	pick_frag.compile(ifrag);
 
 	g_phongShader = new PhongShader;
+	g_shadowShader = new ShadowShader;
 	g_pickShader = new PickShader;
 	g_phongShader->link(basic_vert, phong_frag);
+	g_shadowShader->link(basic_vert, shadow_frag);
 	g_pickShader->link(basic_vert, pick_frag);
 
 	checkGlErrors();
@@ -561,6 +613,97 @@ static void initSphereColliderVisual(float radius, const glm::vec3& center) {
 	g_sphere_index_count = static_cast<unsigned int>(indices.size());
 }
 
+static void initCubeColliderVisual(const glm::vec3& center, const glm::vec3& halfExtents) {
+	const glm::vec3 corners[8] = {
+		center + glm::vec3(-halfExtents.x, -halfExtents.y, -halfExtents.z),
+		center + glm::vec3( halfExtents.x, -halfExtents.y, -halfExtents.z),
+		center + glm::vec3( halfExtents.x,  halfExtents.y, -halfExtents.z),
+		center + glm::vec3(-halfExtents.x,  halfExtents.y, -halfExtents.z),
+		center + glm::vec3(-halfExtents.x, -halfExtents.y,  halfExtents.z),
+		center + glm::vec3( halfExtents.x, -halfExtents.y,  halfExtents.z),
+		center + glm::vec3( halfExtents.x,  halfExtents.y,  halfExtents.z),
+		center + glm::vec3(-halfExtents.x,  halfExtents.y,  halfExtents.z)
+	};
+	const unsigned int faceCorners[6][4] = {
+		{ 0, 3, 2, 1 },
+		{ 4, 5, 6, 7 },
+		{ 0, 4, 7, 3 },
+		{ 1, 2, 6, 5 },
+		{ 0, 1, 5, 4 },
+		{ 3, 7, 6, 2 }
+	};
+	const glm::vec3 faceNormals[6] = {
+		glm::vec3(0.0f, 0.0f, -1.0f),
+		glm::vec3(0.0f, 0.0f, 1.0f),
+		glm::vec3(-1.0f, 0.0f, 0.0f),
+		glm::vec3(1.0f, 0.0f, 0.0f),
+		glm::vec3(0.0f, -1.0f, 0.0f),
+		glm::vec3(0.0f, 1.0f, 0.0f)
+	};
+	const glm::vec2 faceTexcoords[4] = {
+		glm::vec2(0.0f, 0.0f),
+		glm::vec2(1.0f, 0.0f),
+		glm::vec2(1.0f, 1.0f),
+		glm::vec2(0.0f, 1.0f)
+	};
+
+	std::vector<float> positions;
+	std::vector<float> normals;
+	std::vector<float> texcoords;
+	std::vector<unsigned int> indices;
+	positions.reserve(24u * 3u);
+	normals.reserve(24u * 3u);
+	texcoords.reserve(24u * 2u);
+	indices.reserve(36u);
+
+	for (unsigned int face = 0; face < 6u; ++face) {
+		const unsigned int baseIndex = static_cast<unsigned int>(positions.size() / 3u);
+		for (unsigned int corner = 0; corner < 4u; ++corner) {
+			const glm::vec3& position = corners[faceCorners[face][corner]];
+			positions.push_back(position.x);
+			positions.push_back(position.y);
+			positions.push_back(position.z);
+			normals.push_back(faceNormals[face].x);
+			normals.push_back(faceNormals[face].y);
+			normals.push_back(faceNormals[face].z);
+			texcoords.push_back(faceTexcoords[corner].x);
+			texcoords.push_back(faceTexcoords[corner].y);
+		}
+
+		indices.push_back(baseIndex + 0u);
+		indices.push_back(baseIndex + 1u);
+		indices.push_back(baseIndex + 2u);
+		indices.push_back(baseIndex + 0u);
+		indices.push_back(baseIndex + 2u);
+		indices.push_back(baseIndex + 3u);
+	}
+
+	delete g_cube_target;
+	g_cube_target = new ProgramInput;
+	g_cube_target->setPositionData(positions.data(), static_cast<unsigned int>(positions.size()));
+	g_cube_target->setNormalData(normals.data(), static_cast<unsigned int>(normals.size()));
+	g_cube_target->setTextureData(texcoords.data(), static_cast<unsigned int>(texcoords.size()));
+	g_cube_target->setIndexData(indices.data(), static_cast<unsigned int>(indices.size()));
+	g_cube_index_count = static_cast<unsigned int>(indices.size());
+}
+
+static glm::mat4 floorShadowMatrix(float planeHeight, const glm::vec3& lightDirection) {
+	const glm::vec4 plane(0.0f, 0.0f, 1.0f, -planeHeight);
+	const glm::vec4 light(lightDirection.x, lightDirection.y, lightDirection.z, 0.0f);
+	const float dot = glm::dot(plane, light);
+	if (std::abs(dot) <= 1e-6f) {
+		return glm::mat4(1.0f);
+	}
+
+	glm::mat4 shadow(0.0f);
+	for (int row = 0; row < 4; ++row) {
+		for (int col = 0; col < 4; ++col) {
+			shadow[col][row] = ((row == col) ? dot : 0.0f) - light[row] * plane[col];
+		}
+	}
+	return shadow;
+}
+
 static void initScene() {
 	g_ModelViewMatrix = glm::lookAt(
 		glm::vec3(0.618, -0.786, 0.3f) * g_camera_distance,
@@ -589,6 +732,25 @@ static void orientClothForFloorDrop() {
 		positions[3 * i + 0] = x;
 		positions[3 * i + 1] = lateralOffset;
 		positions[3 * i + 2] = -y + lift;
+	}
+
+	g_clothMesh->request_face_normals();
+	g_clothMesh->update_normals();
+	g_clothMesh->release_face_normals();
+	updateRenderTarget();
+}
+
+static void orientClothFlatForDualFloorDrop() {
+	if (g_clothMesh == nullptr || g_render_target == nullptr) return;
+
+	const float sphereTop = PBDDualObstacleDemoParam::sphereCenter.z + PBDDualObstacleDemoParam::sphereRadius;
+	const float cubeTop = PBDDualObstacleDemoParam::cube.center.z + PBDDualObstacleDemoParam::cube.halfExtents.z;
+	const float targetHeight = std::max(sphereTop, cubeTop) + 0.8f;
+	float* const positions = g_clothMesh->vbuff();
+	const unsigned int vertexCount = g_clothMesh->n_vertices();
+
+	for (unsigned int i = 0; i < vertexCount; ++i) {
+		positions[3 * i + 2] = targetHeight;
 	}
 
 	g_clothMesh->request_face_normals();
@@ -854,10 +1016,71 @@ static void demo_pbd_drop_floor() {
 	g_pbdFrameCounter = 0u;
 	initMouseInteraction(g_pbdSolver, n);
 }
+
+static void demo_pbd_drop_floor_dual() {
+	const unsigned int n = PBDSystemParam::n;
+	const Eigen::Vector3f floorPoint(0.0f, 0.0f, g_floor_collision_height);
+	const Eigen::Vector3f floorNormal(0.0f, 0.0f, 1.0f);
+	orientClothFlatForDualFloorDrop();
+	MassSpringBuilder builder;
+	builder.uniformGrid(
+		PBDSystemParam::n,
+		PBDSystemParam::h,
+		PBDSystemParam::r,
+		1.0f,
+		PBDSystemParam::m,
+		PBDSystemParam::a,
+		PBDSystemParam::g
+	);
+
+	mass_spring_system* temp = builder.getResult();
+	g_pbdSystem = buildPBDSystem(*temp);
+	delete temp;
+	g_pbdSystem->time_step = PBDFloorDemoParam::h;
+	g_pbdSolver = new PBDSolver(g_pbdSystem, g_clothMesh->vbuff());
+	g_pbdSolver->setSolverIterations(PBDFloorDemoParam::n_iter);
+	g_pbdSolver->setSelfCollisionStiffness(PBDFloorDemoParam::selfCollisionStiffness);
+	g_pbdSolver->setMaxSelfCollisionContactsPerVertex(PBDFloorDemoParam::maxSelfCollisionContactsPerVertex);
+	if (g_selfCollisionThicknessOverride > 0.0f) {
+		g_pbdSolver->setSelfCollisionThickness(g_selfCollisionThicknessOverride);
+	}
+	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), PBDSystemParam::k_stretch);
+	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
+	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDSystemParam::k_bend);
+	g_pbdSolver->addPlaneCollider(floorPoint, floorNormal);
+	g_pbdSolver->addSphereCollider(
+		Eigen::Vector3f(
+			PBDDualObstacleDemoParam::sphereCenter.x,
+			PBDDualObstacleDemoParam::sphereCenter.y,
+			PBDDualObstacleDemoParam::sphereCenter.z
+		),
+		PBDDualObstacleDemoParam::sphereRadius
+	);
+	g_pbdSolver->addBoxCollider(
+		Eigen::Vector3f(
+			PBDDualObstacleDemoParam::cube.center.x,
+			PBDDualObstacleDemoParam::cube.center.y,
+			PBDDualObstacleDemoParam::cube.center.z
+		),
+		Eigen::Vector3f(
+			PBDDualObstacleDemoParam::cube.halfExtents.x,
+			PBDDualObstacleDemoParam::cube.halfExtents.y,
+			PBDDualObstacleDemoParam::cube.halfExtents.z
+		)
+	);
+	initSphereColliderVisual(PBDDualObstacleDemoParam::sphereRadius, PBDDualObstacleDemoParam::sphereCenter);
+	// Render and collision use the same shared analytic box definition.
+	initCubeColliderVisual(PBDDualObstacleDemoParam::cube.center, PBDDualObstacleDemoParam::cube.halfExtents);
+	g_pbdFrameCounter = 0u;
+	initMouseInteraction(g_pbdSolver, n);
+}
 // G L U T  C A L L B A C K S //////////////////////////////////////////////////////
 static void display() {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	if (isFloorDemo()) drawFloor();
+	if (isFloorDemo()) {
+		drawFloor();
+		drawFloorShadows();
+	}
 	if (hasSphereColliderVisual() && g_sphere_target != nullptr) {
 		Renderer renderer;
 		renderer.setProgram(g_phongShader);
@@ -866,8 +1089,24 @@ static void display() {
 		g_phongShader->setAlbedo(g_sphere_albedo);
 		g_phongShader->setAmbient(g_sphere_ambient);
 		g_phongShader->setLight(g_light);
+		g_phongShader->setSpecularStrength(g_specular_strength);
+		g_phongShader->setShininess(g_shininess);
 		renderer.setProgramInput(g_sphere_target);
 		renderer.setElementCount(g_sphere_index_count);
+		renderer.draw();
+	}
+	if (hasCubeColliderVisual() && g_cube_target != nullptr) {
+		Renderer renderer;
+		renderer.setProgram(g_phongShader);
+		renderer.setModelview(g_ModelViewMatrix);
+		renderer.setProjection(g_ProjectionMatrix);
+		g_phongShader->setAlbedo(g_sphere_albedo);
+		g_phongShader->setAmbient(g_sphere_ambient);
+		g_phongShader->setLight(g_light);
+		g_phongShader->setSpecularStrength(g_specular_strength);
+		g_phongShader->setShininess(g_shininess);
+		renderer.setProgramInput(g_cube_target);
+		renderer.setElementCount(g_cube_index_count);
 		renderer.draw();
 	}
 	drawCloth();
@@ -933,9 +1172,46 @@ static void drawFloor() {
 	g_phongShader->setAlbedo(g_floor_albedo);
 	g_phongShader->setAmbient(g_floor_ambient);
 	g_phongShader->setLight(g_light);
+	g_phongShader->setSpecularStrength(0.12f);
+	g_phongShader->setShininess(18.0f);
 	renderer.setProgramInput(g_floor_target);
 	renderer.setElementCount(6);
 	renderer.draw();
+}
+
+static void drawFloorShadows() {
+	if (!isFloorDemo() || g_shadowShader == nullptr) return;
+
+	const float shadowPlaneHeight = g_floor_collision_height + g_floor_render_offset + 1e-3f;
+	const glm::mat4 shadowModelView = g_ModelViewMatrix * floorShadowMatrix(shadowPlaneHeight, glm::normalize(g_light));
+
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glDepthMask(GL_FALSE);
+
+	Renderer renderer;
+	renderer.setProgram(g_shadowShader);
+	renderer.setProjection(g_ProjectionMatrix);
+	renderer.setModelview(shadowModelView);
+	g_shadowShader->setShadowColor(g_shadow_color);
+
+	renderer.setProgramInput(g_render_target);
+	renderer.setElementCount(g_clothMesh->ibuffLen());
+	renderer.draw();
+
+	if (hasSphereColliderVisual() && g_sphere_target != nullptr) {
+		renderer.setProgramInput(g_sphere_target);
+		renderer.setElementCount(g_sphere_index_count);
+		renderer.draw();
+	}
+	if (hasCubeColliderVisual() && g_cube_target != nullptr) {
+		renderer.setProgramInput(g_cube_target);
+		renderer.setElementCount(g_cube_index_count);
+		renderer.draw();
+	}
+
+	glDepthMask(GL_TRUE);
+	glDisable(GL_BLEND);
 }
 
 static void drawCloth() {
@@ -946,6 +1222,8 @@ static void drawCloth() {
 	g_phongShader->setAlbedo(g_albedo);
 	g_phongShader->setAmbient(g_ambient);
 	g_phongShader->setLight(g_light);
+	g_phongShader->setSpecularStrength(g_specular_strength);
+	g_phongShader->setShininess(g_shininess);
 	renderer.setProgramInput(g_render_target);
 	renderer.setElementCount(g_clothMesh->ibuffLen());
 	renderer.draw();
@@ -991,9 +1269,12 @@ static void logPBDSelfCollisionDiagnostics() {
 	if ((g_pbdFrameCounter % PBDDebugParam::debugPrintPeriod) != 0u) return;
 
 	const SelfCollisionDebugStats& stats = g_pbdSolver->getSelfCollisionDebugStats();
-	const char* modeLabel = isFloorDemo()
-		? "pbd drop-floor"
-		: (g_mode == SimMode::PBDDrop ? "pbd drop" : (g_mode == SimMode::PBDHangWind ? "pbd hang_wind" : "pbd hang"));
+	const char* modeLabel =
+		(g_mode == SimMode::PBDDropFloorDual)
+			? "pbd drop-floor-dual"
+			: (isFloorDemo()
+				? "pbd drop-floor"
+				: (g_mode == SimMode::PBDDrop ? "pbd drop" : (g_mode == SimMode::PBDHangWind ? "pbd hang_wind" : "pbd hang")));
 	std::cout
 		<< "[" << modeLabel << " self-collision] frame=" << g_pbdFrameCounter
 		<< " generated=" << stats.generatedContacts
@@ -1032,12 +1313,14 @@ static void cleanUp() {
 	delete g_render_target;
 	delete g_floor_target;
 	delete g_sphere_target;
+	delete g_cube_target;
 
 	// delete mass-spring system
 	delete g_system;
 	delete g_solver;
 	delete g_pbdSystem;
 	delete g_pbdSolver;
+	delete g_shadowShader;
 
 	// delete constraint graph
 	// TODO

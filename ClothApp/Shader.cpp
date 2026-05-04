@@ -165,6 +165,8 @@ void PhongShader::postLink() {
 	uAlbedo = glGetUniformLocation(handle, "uAlbedo");
 	uAmbient = glGetUniformLocation(handle, "uAmbient");
 	uLight = glGetUniformLocation(handle, "uLight");
+	uSpecularStrength = glGetUniformLocation(handle, "uSpecularStrength");
+	uShininess = glGetUniformLocation(handle, "uShininess");
 }
 void PhongShader::setAlbedo(const glm::vec3& albedo) {
 	assert(uAlbedo >= 0);
@@ -182,6 +184,31 @@ void PhongShader::setLight(const glm::vec3& light) {
 	assert(uLight >= 0);
 	glUseProgram(*this);
 	glUniform3f(uLight, light[0], light[1], light[2]);
+	glUseProgram(0);
+}
+void PhongShader::setSpecularStrength(float strength) {
+	assert(uSpecularStrength >= 0);
+	glUseProgram(*this);
+	glUniform1f(uSpecularStrength, strength);
+	glUseProgram(0);
+}
+void PhongShader::setShininess(float shininess) {
+	assert(uShininess >= 0);
+	glUseProgram(*this);
+	glUniform1f(uShininess, shininess);
+	glUseProgram(0);
+}
+
+ShadowShader::ShadowShader() : GLProgram() {}
+
+void ShadowShader::postLink() {
+	uShadowColor = glGetUniformLocation(handle, "uShadowColor");
+}
+
+void ShadowShader::setShadowColor(const glm::vec4& color) {
+	assert(uShadowColor >= 0);
+	glUseProgram(*this);
+	glUniform4f(uShadowColor, color[0], color[1], color[2], color[3]);
 	glUseProgram(0);
 }
 

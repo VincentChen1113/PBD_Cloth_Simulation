@@ -62,9 +62,14 @@ if(WIN32)
   add_definitions(-D_USE_MATH_DEFINES)
 endif()
 
-# copy shaders to binary directory
-file(INSTALL ClothApp/shaders/ DESTINATION shaders/)
-
 # create executable
 add_executable(fast-mass-spring ${Sources})
 target_link_libraries(fast-mass-spring ${OPENGL_LIBRARIES} ${GLUT_LIBRARIES} ${GLEW_LIBRARIES} OpenMeshCore eigen glm)
+
+# copy shaders to binary directory on every build so newly added shader files
+# are available without requiring a manual reconfigure.
+add_custom_command(TARGET fast-mass-spring POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          ${CMAKE_CURRENT_SOURCE_DIR}/ClothApp/shaders
+          ${CMAKE_CURRENT_BINARY_DIR}/shaders
+)

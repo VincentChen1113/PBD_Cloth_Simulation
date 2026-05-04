@@ -275,14 +275,15 @@ void applySphereContactDamping(
 	const std::vector<Eigen::Vector3f>& previousPositions,
 	const std::vector<float>& invMass,
 	const std::vector<SphereCollider>& sphereColliders,
-	float collisionEps
+	float collisionEps,
+	float collisionThickness
 ) {
 	if (sphereColliders.empty()) return;
 
 	const float friction = std::max(0.0f, std::min(1.0f, PBDDefaultParam::contactFriction));
 	if (friction <= 0.0f) return;
 
-	const float contactBand = 2.0f * collisionEps;
+	const float contactBand = std::max(collisionThickness, collisionEps) + collisionEps;
 	for (const SphereCollider& collider : sphereColliders) {
 		for (unsigned int i = 0; i < positions.size() && i < previousPositions.size() && i < invMass.size(); ++i) {
 			if (invMass[i] == 0.0f) continue;
@@ -874,7 +875,14 @@ void PBDSolver::step(float dt) {
 		projectConstraints(persistentConstraints);
 		projectConstraints(generatedCollisionConstraints);
 	}
-	applySphereContactDamping(p, x, invMass, sphereColliders, collisionEps);
+	applySphereContactDamping(
+		p,
+		x,
+		invMass,
+		sphereColliders,
+		collisionEps,
+		selfCollisionThickness
+	);
 	updateSelfCollisionDebugStats(p, true);
 
 	updateVelocities(dt);
@@ -916,6 +924,8 @@ void PBDSolver::applyExternalForces(float dt) {
 		if (invMass[i] == 0.0f) continue; // fixed particles do not accelerate
 		v[i] += dt * gravity;
 		if (restX[i].y() <= bottomHalfRestYThreshold) {
+			// For the hang_wind demo, apply a simple "wind" force to the lower half of the cloth. 
+			// This is a simple test example to mimic wind. 
 			v[i] += dt * bottomHalfWindAcceleration;
 		}
 	}
@@ -1153,14 +1163,15 @@ void PBDSolver::generateCollisionConstraints() {
 		for (unsigned int i = 0; i < system->n_points; ++i) {
 			if (invMass[i] == 0.0f) continue;
 
+			const float contactRadius = collider.radius + std::max(selfCollisionThickness, collisionEps);
 			const Vector3f delta = p[i] - collider.center;
-			if (delta.norm() >= collider.radius) continue;
+			if (delta.norm() >= contactRadius) continue;
 
 			generatedCollisionConstraints.push_back(
 				std::make_unique<CollisionConstraint>(
 					i,
 					collider.center,
-					collider.radius + collisionEps,
+					contactRadius,
 					PBDDefaultParam::collisionStiffness
 				)
 			);

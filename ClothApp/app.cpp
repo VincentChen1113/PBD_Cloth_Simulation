@@ -7,6 +7,7 @@
 #include <string>
 #include <sstream>
 #include <vector>
+#include <cmath>
 
 #include "Shader.h"
 #include "Mesh.h"
@@ -28,11 +29,15 @@ static int g_mouseClickY;
 static UserInteraction* UI;
 static Renderer* g_pickRenderer;
 static ProgramInput* g_floor_target;
+static ProgramInput* g_sphere_target;
+static unsigned int g_sphere_index_count = 0u;
 
 // Constants
 static const float PI = glm::pi<float>();
 static const glm::vec3 g_floor_albedo(0.55f, 0.55f, 0.58f);
 static const glm::vec3 g_floor_ambient(0.04f, 0.04f, 0.04f);
+static const glm::vec3 g_sphere_albedo(0.36f, 0.38f, 0.40f);
+static const glm::vec3 g_sphere_ambient(0.05f, 0.05f, 0.05f);
 static const float g_floor_collision_height = -1.75f;
 static const float g_floor_render_offset = -0.002f;
 static const float g_floor_extent = 3.5f;
@@ -105,8 +110,8 @@ namespace PBDSystemParam {
 	static const int n_iter = 20; // solver iterations | 15
 	static const float a = 0.02f; // damping factor
 	static const float eps = 1e-4f; // collision epsilon
-	static const float k_stretch = 1.0f; // stretch stiffness | 1.0f
-	static const float k_shear = 0.8f; // shear stiffness | 0.8f
+	static const float k_stretch = 0.9f; // stretch stiffness | 1.0f
+	static const float k_shear = 0.65f; // shear stiffness | 0.8f
 	static const float k_bend = 0.01f; // bend stiffness | 0.01f
 	static const float sphere_radius = 0.64f;
 }
@@ -132,11 +137,13 @@ static void validateParsedOptions();
 static void initShaders(); // Read, compile and link shaders
 static void initCloth(); // Generate cloth mesh
 static void initFloor(); // Generate floor mesh
+static void initSphereColliderVisual(float radius, const glm::vec3& center); // Generate sphere collider mesh
 static void initScene(); // Generate scene matrices
 static void initMouseInteraction(FixedPointController*, unsigned int);
 static void orientClothForFloorDrop();
 static void logPBDSelfCollisionDiagnostics();
 static bool isPBDMode();
+static bool hasSphereColliderVisual();
 static unsigned int activeGridSize();
 static float activeClothWidth();
 static pbd_system* buildPBDSystem(const mass_spring_system& system);
@@ -163,6 +170,10 @@ static void(*g_demo)() = demo_hang;
 
 static bool isFloorDemo() {
 	return g_mode == SimMode::PBDDropFloor;
+}
+
+static bool hasSphereColliderVisual() {
+	return g_mode == SimMode::MassSpringDrop || g_mode == SimMode::PBDDrop;
 }
 
 static void selectDemo() {
@@ -485,6 +496,71 @@ static void initFloor() {
 	g_floor_target->setIndexData(floorIndices, 6);
 }
 
+static void initSphereColliderVisual(float radius, const glm::vec3& center) {
+	const unsigned int stacks = 24u;
+	const unsigned int slices = 48u;
+	std::vector<float> positions;
+	std::vector<float> normals;
+	std::vector<float> texcoords;
+	std::vector<unsigned int> indices;
+
+	positions.reserve((stacks + 1u) * (slices + 1u) * 3u);
+	normals.reserve((stacks + 1u) * (slices + 1u) * 3u);
+	texcoords.reserve((stacks + 1u) * (slices + 1u) * 2u);
+	indices.reserve(stacks * slices * 6u);
+
+	for (unsigned int stack = 0; stack <= stacks; ++stack) {
+		const float v = static_cast<float>(stack) / static_cast<float>(stacks);
+		const float phi = PI * v;
+		const float sinPhi = std::sin(phi);
+		const float cosPhi = std::cos(phi);
+
+		for (unsigned int slice = 0; slice <= slices; ++slice) {
+			const float u = static_cast<float>(slice) / static_cast<float>(slices);
+			const float theta = 2.0f * PI * u;
+			const float sinTheta = std::sin(theta);
+			const float cosTheta = std::cos(theta);
+			const glm::vec3 normal(sinPhi * cosTheta, sinPhi * sinTheta, cosPhi);
+			const glm::vec3 position = center + radius * normal;
+
+			positions.push_back(position.x);
+			positions.push_back(position.y);
+			positions.push_back(position.z);
+			normals.push_back(normal.x);
+			normals.push_back(normal.y);
+			normals.push_back(normal.z);
+			texcoords.push_back(u);
+			texcoords.push_back(v);
+		}
+	}
+
+	for (unsigned int stack = 0; stack < stacks; ++stack) {
+		for (unsigned int slice = 0; slice < slices; ++slice) {
+			const unsigned int rowStart = stack * (slices + 1u);
+			const unsigned int nextRowStart = (stack + 1u) * (slices + 1u);
+			const unsigned int topLeft = rowStart + slice;
+			const unsigned int topRight = topLeft + 1u;
+			const unsigned int bottomLeft = nextRowStart + slice;
+			const unsigned int bottomRight = bottomLeft + 1u;
+
+			indices.push_back(topLeft);
+			indices.push_back(bottomLeft);
+			indices.push_back(topRight);
+			indices.push_back(topRight);
+			indices.push_back(bottomLeft);
+			indices.push_back(bottomRight);
+		}
+	}
+
+	delete g_sphere_target;
+	g_sphere_target = new ProgramInput;
+	g_sphere_target->setPositionData(positions.data(), static_cast<unsigned int>(positions.size()));
+	g_sphere_target->setNormalData(normals.data(), static_cast<unsigned int>(normals.size()));
+	g_sphere_target->setTextureData(texcoords.data(), static_cast<unsigned int>(texcoords.size()));
+	g_sphere_target->setIndexData(indices.data(), static_cast<unsigned int>(indices.size()));
+	g_sphere_index_count = static_cast<unsigned int>(indices.size());
+}
+
 static void initScene() {
 	g_ModelViewMatrix = glm::lookAt(
 		glm::vec3(0.618, -0.786, 0.3f) * g_camera_distance,
@@ -630,6 +706,7 @@ static void demo_drop() {
 	// sphere collision constraint
 	CgSphereCollisionNode* sphereCollisionNode =
 		new CgSphereCollisionNode(g_system, g_clothMesh->vbuff(), radius, center);
+	initSphereColliderVisual(radius, glm::vec3(center[0], center[1], center[2]));
 
 	// spring deformation constraint
 	CgSpringDeformationNode* deformationNode =
@@ -715,6 +792,7 @@ static void demo_pbd_hang_wind() {
 
 static void demo_pbd_drop() {
 	const unsigned int n = PBDSystemParam::n;
+	const glm::vec3 sphereCenter(0.0f, 0.0f, -1.0f);
 	MassSpringBuilder builder;
 	builder.uniformGrid(
 		PBDSystemParam::n,
@@ -737,7 +815,8 @@ static void demo_pbd_drop() {
 	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), PBDSystemParam::k_stretch);
 	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
 	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDSystemParam::k_bend);
-	g_pbdSolver->addSphereCollider(Eigen::Vector3f(0.0f, 0.0f, -1.0f), PBDSystemParam::sphere_radius);
+	g_pbdSolver->addSphereCollider(Eigen::Vector3f(sphereCenter.x, sphereCenter.y, sphereCenter.z), PBDSystemParam::sphere_radius);
+	initSphereColliderVisual(PBDSystemParam::sphere_radius, sphereCenter);
 	initMouseInteraction(g_pbdSolver, n);
 }
 
@@ -779,6 +858,18 @@ static void demo_pbd_drop_floor() {
 static void display() {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	if (isFloorDemo()) drawFloor();
+	if (hasSphereColliderVisual() && g_sphere_target != nullptr) {
+		Renderer renderer;
+		renderer.setProgram(g_phongShader);
+		renderer.setModelview(g_ModelViewMatrix);
+		renderer.setProjection(g_ProjectionMatrix);
+		g_phongShader->setAlbedo(g_sphere_albedo);
+		g_phongShader->setAmbient(g_sphere_ambient);
+		g_phongShader->setLight(g_light);
+		renderer.setProgramInput(g_sphere_target);
+		renderer.setElementCount(g_sphere_index_count);
+		renderer.draw();
+	}
 	drawCloth();
 	glutSwapBuffers();
 
@@ -940,6 +1031,7 @@ static void cleanUp() {
 	// delete render target
 	delete g_render_target;
 	delete g_floor_target;
+	delete g_sphere_target;
 
 	// delete mass-spring system
 	delete g_system;

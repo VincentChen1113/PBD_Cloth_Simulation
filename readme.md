@@ -19,7 +19,7 @@ The primary goal of this project is to implement a **Position-Based Dynamics (PB
 The current codebase now includes both:
 
 - the original **fast mass-spring solver** for baseline comparison
-- a separate **PBD cloth solver** with stretch, shear, bend, fixed-point, sphere collision, plane collision, self-collision, a dedicated floor-drop scene, a simple hang-wind scene, and optional debug diagnostics
+- a separate **PBD cloth solver** with stretch, shear, bend, fixed-point, sphere collision, plane collision, self-collision, a dedicated floor-drop scene, a flag-style wind demo, and optional debug diagnostics
 
 ### Objectives
 
@@ -50,16 +50,27 @@ The current PBD solver includes:
 - sphere and plane collision as generated inequality constraints
 - self-collision detection and resolution with debug counters
 - a dedicated `drop-floor` scene for floor interaction and tuning
-- a simple `hang_wind` scene with bottom-half wind acceleration control
+- a `hang-wind` scene with drag-only aerodynamic forcing, gust modulation, and procedural flutter noise
 
 ### Demo
 
 Available runtime scenes:
 
 - `pbd hang`
-- `pbd hang_wind`
+- `pbd hang-wind`
 - `pbd drop`
 - `pbd drop-floor`
+
+### Wind Demo
+
+The wind demo configures the cloth like a flag:
+
+- one side edge is pinned like cloth attached to a pole
+- wind blows horizontally, perpendicular to gravity
+- aerodynamic forcing uses a **drag-only** triangle-based model
+- gusts and small procedural noise modulate the base wind speed over time
+
+The current wind speed is controlled explicitly from the command line with `--wind-speed`.
 
 ---
 
@@ -101,13 +112,13 @@ The executable supports both long-form and short-form mode selection:
 
 ```bash
 ./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug]
-./fast-mass-spring pbd [hang|hang_wind|drop|drop-floor] [--self-thickness value] [--debug] [--wind-accel value]
+./fast-mass-spring pbd [hang|hang-wind|drop|drop-floor|drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value]
 ```
 
 Or equivalently:
 
 ```bash
-./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang_wind|pbd-drop|pbd-drop-floor] [--self-thickness value] [--debug] [--wind-accel value]
+./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang-wind|pbd-drop|pbd-drop-floor|pbd-drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value]
 ```
 
 Examples:
@@ -116,8 +127,8 @@ Examples:
 ./fast-mass-spring mass-spring hang
 ./fast-mass-spring ms drop
 ./fast-mass-spring pbd hang
-./fast-mass-spring pbd hang_wind --wind-accel 5
-./fast-mass-spring pbd-hang_wind --wind-accel -5
+./fast-mass-spring pbd hang-wind --wind-speed 5
+./fast-mass-spring pbd-hang-wind --wind-speed 8
 ./fast-mass-spring pbd drop
 ./fast-mass-spring pbd drop-floor
 ./fast-mass-spring pbd drop-floor --self-thickness 0.02
@@ -127,7 +138,7 @@ Examples:
 Flags:
 
 - `--self-thickness value`: overrides the PBD self-collision thickness with a positive float value
-- `--wind-accel value`: required for `pbd hang_wind`; accepts a float in `[-15, 15]`. Positive values push the lower half of the hanging cloth inward, perpendicular to gravity, and negative values push it outward
+- `--wind-speed value`: required for `pbd hang-wind`; accepts a float in `[0, 15]` and sets the base horizontal wind speed used by the drag/gust model
 - `--debug`: enables debug diagnostics output for PBD demos and prints self-collision counters to the terminal
 
 If no arguments are provided, the program defaults to the mass-spring hanging cloth demo.
@@ -178,7 +189,7 @@ Status snapshot for the current implementation:
 - [x] Verify shading / mesh integrity after simulation
 
 ## Testing / Validation
-- [ ] Validate single-particle / two-particle cases
+- [x] Validate single-particle / two-particle cases
 - [x] Validate hanging cloth behavior
 - [x] Validate cloth drop / draping demo
 - [x] Test timestep / iteration / resolution stability
@@ -214,3 +225,7 @@ the Stony Brook University CSE 328 final project.
 [3] Müller, M., Heidelberger, B., Hennix, M., & Ratcliff, J. (2007).  
 *Position Based Dynamics.*  
 In C. Mendoza & I. Navazo (Eds.), Proceedings of the 3rd Workshop in Virtual Reality Interactions and Physical Simulation (VRIPHYS 2006).
+
+[4] Keckeisen, M., Kimmerle, S., Thomaszewski, B., & Wacker, M. (2004).
+*Modelling Effects of Wind Fields in Cloth Animations.*
+Journal of WSCG, 12(1–3).

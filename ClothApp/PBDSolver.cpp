@@ -17,6 +17,7 @@ namespace PBDDefaultParam {
 	static const unsigned int maxSelfCollisionContactsPerVertex = 4u;    // 12u
 	static const float velocitySleepThreshold = 5e-3f;
 	static const Eigen::Vector3f gravity(0.0f, 0.0f, -9.81f);
+	static const float twoPi = 6.28318530718f;
 }
 
 namespace {
@@ -149,6 +150,36 @@ bool pointProjectsInsideTriangle(
 		&& barycentric.z() >= tolerance;
 }
 
+bool triangleUnitNormal(
+	const std::vector<Eigen::Vector3f>& positions,
+	unsigned int p1Index,
+	unsigned int p2Index,
+	unsigned int p3Index,
+	Eigen::Vector3f& outNormal,
+	float* outDoubleArea = nullptr
+) {
+	if (p1Index >= positions.size()
+		|| p2Index >= positions.size()
+		|| p3Index >= positions.size()) {
+		return false;
+	}
+
+	const Eigen::Vector3f& p1 = positions[p1Index];
+	const Eigen::Vector3f& p2 = positions[p2Index];
+	const Eigen::Vector3f& p3 = positions[p3Index];
+	outNormal = (p2 - p1).cross(p3 - p1);
+	const float normalLength = outNormal.norm();
+	if (normalLength <= 1e-8f) {
+		return false;
+	}
+
+	if (outDoubleArea != nullptr) {
+		*outDoubleArea = normalLength;
+	}
+	outNormal /= normalLength;
+	return true;
+}
+
 bool triangleNormalAndSignedDistance(
 	const std::vector<Eigen::Vector3f>& positions,
 	unsigned int vertexIndex,
@@ -166,15 +197,9 @@ bool triangleNormalAndSignedDistance(
 	}
 
 	const Eigen::Vector3f& p1 = positions[p1Index];
-	const Eigen::Vector3f& p2 = positions[p2Index];
-	const Eigen::Vector3f& p3 = positions[p3Index];
-	outNormal = (p2 - p1).cross(p3 - p1);
-	const float normalLength = outNormal.norm();
-	if (normalLength <= 1e-8f) {
+	if (!triangleUnitNormal(positions, p1Index, p2Index, p3Index, outNormal)) {
 		return false;
 	}
-
-	outNormal /= normalLength;
 	outSignedDistance = (positions[vertexIndex] - p1).dot(outNormal);
 	return true;
 }
@@ -1003,9 +1028,9 @@ PBDSolver::PBDSolver(pbd_system* system, float* vbuff)
 	  maxSelfCollisionContactsPerVertex(PBDDefaultParam::maxSelfCollisionContactsPerVertex),
 	  velocitySleepThreshold(PBDDefaultParam::velocitySleepThreshold),
 	  gravity(PBDDefaultParam::gravity),
-	  bottomHalfWindAcceleration(Vector3f::Zero()),
-	  bottomHalfWindDirection(Vector3f(0.0f, 1.0f, 0.0f)),
-	  bottomHalfRestYThreshold(0.0f) {
+	  windConfig(),
+	  simulationTime(0.0f),
+	  windSpeedState(0.0f) {
 	assert(system != nullptr);
 	assert(vbuff != nullptr);
 
@@ -1036,23 +1061,6 @@ PBDSolver::PBDSolver(pbd_system* system, float* vbuff)
 		// Broad-phase hashing is more reliable when cells match the cloth's edge
 		// scale instead of the much smaller thickness band.
 		selfCollisionCellSize = std::max(meanRestLength, collisionEps);
-	}
-
-	if (!restX.empty()) {
-		float minRestY = restX.front().y();
-		float maxRestY = restX.front().y();
-		for (const Vector3f& restPos : restX) {
-			minRestY = std::min(minRestY, restPos.y());
-			maxRestY = std::max(maxRestY, restPos.y());
-		}
-		bottomHalfRestYThreshold = 0.5f * (minRestY + maxRestY);
-
-		// For the hang_wind demo, "inward" means from the lower half toward the
-		// cloth interior/top edge, i.e. along +y in the rest grid. This keeps the
-		// wind perpendicular to gravity instead of pushing along the cloth normal.
-		if ((maxRestY - minRestY) > 1e-6f) {
-			bottomHalfWindDirection = Vector3f(0.0f, 1.0f, 0.0f);
-		}
 	}
 }
 
@@ -1158,14 +1166,147 @@ void PBDSolver::applyExternalForces(float dt) {
 	const unsigned int n = system->n_points;
 	// Pseudo-code (5):
 	//   v_i <- v_i + dt * f_ext_i / m_i
-	// Here gravity is stored directly as an acceleration vector.
+	// Gravity is stored directly as an acceleration vector.
 	for (unsigned int i = 0; i < n; ++i) {
 		if (invMass[i] == 0.0f) continue; // fixed particles do not accelerate
 		v[i] += dt * gravity;
-		if (restX[i].y() <= bottomHalfRestYThreshold) {
-			// For the hang_wind demo, apply a simple "wind" force to the lower half of the cloth. 
-			// This is a simple test example to mimic wind. 
-			v[i] += dt * bottomHalfWindAcceleration;
+	}
+
+	// Wind is treated as an external aerodynamic force instead of a positional
+	// constraint so the solver remains lightweight and localized to one force
+	// accumulation stage.
+	applyAerodynamicForces(dt);
+	simulationTime += std::max(dt, 0.0f);
+}
+
+bool PBDSolver::isWindEnabled() const {
+	return windConfig.inputMode != PBDWindInputMode::Disabled;
+}
+
+float PBDSolver::triangleFaceArea(unsigned int i0, unsigned int i1, unsigned int i2) const {
+	if (i0 >= x.size() || i1 >= x.size() || i2 >= x.size()) return 0.0f;
+
+	// Triangle area used by the aerodynamic model:
+	//   A = 0.5 * || (x_1 - x_0) x (x_2 - x_0) ||
+	// Larger faces catch more air and therefore produce larger drag forces.
+	Vector3f faceNormal = Vector3f::Zero();
+	float doubleArea = 0.0f;
+	if (!triangleUnitNormal(x, i0, i1, i2, faceNormal, &doubleArea)) return 0.0f;
+	return 0.5f * doubleArea;
+}
+
+PBDSolver::Vector3f PBDSolver::triangleFaceNormal(unsigned int i0, unsigned int i1, unsigned int i2) const {
+	// Reuse the shared triangle-normal helper already used by collision code:
+	//   n = ((x_1 - x_0) x (x_2 - x_0)) / || (x_1 - x_0) x (x_2 - x_0) ||
+	Vector3f normal = Vector3f::Zero();
+	if (!triangleUnitNormal(x, i0, i1, i2, normal)) return Vector3f::Zero();
+	return normal;
+}
+
+PBDSolver::Vector3f PBDSolver::averageTriangleVelocity(unsigned int i0, unsigned int i1, unsigned int i2) const {
+	if (i0 >= v.size() || i1 >= v.size() || i2 >= v.size()) return Vector3f::Zero();
+
+	// Paper-style face velocity approximation:
+	//   v_object = (v_0 + v_1 + v_2) / 3
+	// The drag model uses the triangle-average velocity instead of a per-vertex
+	// air speed so each face receives one aerodynamic force sample.
+	return (v[i0] + v[i1] + v[i2]) / 3.0f;
+}
+
+float PBDSolver::proceduralWindNoise(const Vector3f& triangleCenter) const {
+	// Lightweight flutter term layered on top of the deterministic gust so the
+	// cloth does not move as if every face saw the exact same wind history.
+	const float phase0 = 1.73f * simulationTime + 0.91f * triangleCenter.x() + 0.37f * triangleCenter.z();
+	const float phase1 = 2.41f * simulationTime + 0.63f * triangleCenter.y() - 0.52f * triangleCenter.x();
+	return 0.5f * std::sin(phase0) + 0.5f * std::cos(phase1);
+}
+
+float PBDSolver::currentWindSpeed(const Vector3f& triangleCenter, float dt) {
+	if (!isWindEnabled()) return 0.0f;
+
+	// User input selects either a direct speed or an acceleration integrated in
+	// time. The gust model follows the requested paper-style modulation:
+	//   u(t) = u_base + A_gust * sin(2 * pi * f_gust * t) + noise(t, x)
+	// The final speed is clamped so gust/noise cannot create extreme forces.
+	const float maxWindSpeed = std::max(0.0f, windConfig.maxWindSpeed);
+	if (windConfig.inputMode == PBDWindInputMode::Speed) {
+		windSpeedState = std::max(0.0f, windConfig.baseSpeed);
+	}
+	else if (windConfig.inputMode == PBDWindInputMode::Acceleration) {
+		windSpeedState = std::max(0.0f, std::min(maxWindSpeed, windSpeedState + dt * windConfig.baseAcceleration));
+	}
+
+	const float gust = windConfig.gustAmplitude
+		* std::sin(PBDDefaultParam::twoPi * windConfig.gustFrequency * simulationTime);
+	const float noise = windConfig.noiseStrength * proceduralWindNoise(triangleCenter);
+	return std::max(0.0f, std::min(maxWindSpeed, windSpeedState + gust + noise));
+}
+
+void PBDSolver::applyAerodynamicForces(float dt) {
+	if (!isWindEnabled() || dt <= 0.0f) return;
+	if (system->triangle_indices.size() < 3 || system->triangle_indices.size() % 3 != 0) return;
+
+	for (std::size_t triangle = 0; triangle + 2 < system->triangle_indices.size(); triangle += 3) {
+		const unsigned int i0 = system->triangle_indices[triangle + 0];
+		const unsigned int i1 = system->triangle_indices[triangle + 1];
+		const unsigned int i2 = system->triangle_indices[triangle + 2];
+		if (i0 >= x.size() || i1 >= x.size() || i2 >= x.size()) continue;
+
+		const float faceArea = triangleFaceArea(i0, i1, i2);
+		if (faceArea <= 1e-8f) continue;
+
+		// Face area controls how much air the triangle catches, while the face
+		// normal controls whether wind strikes the broad face or mostly slides
+		// along the edge.
+		const Vector3f faceNormal = triangleFaceNormal(i0, i1, i2);
+		if (faceNormal.squaredNorm() <= 1e-12f) continue;
+
+		const Vector3f triangleCenter = (x[i0] + x[i1] + x[i2]) / 3.0f;
+		const float modulatedWindSpeed = currentWindSpeed(triangleCenter, dt);
+		if (modulatedWindSpeed <= 1e-6f) continue;
+
+		const Vector3f objectVelocity = averageTriangleVelocity(i0, i1, i2);
+		// Wind velocity for the current face sample:
+		//   u_wind = d_wind * currentWindSpeed
+		const Vector3f windVelocity = windConfig.windDirection * modulatedWindSpeed;
+		// Relative air speed from the paper-style drag model:
+		//   v_rel = v_object - u_wind
+		// Drag depends on the relative velocity between the moving cloth face and
+		// the surrounding air, using the face-averaged triangle velocity.
+		const Vector3f relativeVelocity = objectVelocity - windVelocity;
+		const float relativeSpeed = relativeVelocity.norm();
+		if (relativeSpeed <= 1e-6f) continue;
+
+		const Vector3f incomingFlowDirection = -relativeVelocity / relativeSpeed;
+		const float orientationFactor = std::abs(faceNormal.dot(incomingFlowDirection));
+		if (orientationFactor <= 1e-4f) continue;
+
+		// Drag-only aerodynamic force:
+		//   F_drag = -0.5 * rho * C_D * A * |v_rel|^2 * exposure * v_rel_hat
+		// where exposure is approximated with |n . (-v_rel_hat)| so broad faces
+		// catch more air than edge-on faces. Lift is intentionally omitted here.
+		const float dragMagnitude = 0.5f
+			* windConfig.airDensity
+			* windConfig.dragCoefficient
+			* faceArea
+			* relativeSpeed
+			* relativeSpeed
+			* orientationFactor;
+		const Vector3f dragForce = -dragMagnitude * (relativeVelocity / relativeSpeed);
+
+		// Gust and noise are small time-varying speed modulations that create a
+		// lightweight flag-like flutter without introducing a full wind-field
+		// solver.
+		const Vector3f perVertexForce = dragForce / 3.0f;
+		const unsigned int triangleVertices[3] = { i0, i1, i2 };
+		for (unsigned int localVertex = 0; localVertex < 3; ++localVertex) {
+			const unsigned int vertex = triangleVertices[localVertex];
+			if (vertex >= invMass.size() || invMass[vertex] == 0.0f) continue;
+			// Convert force to acceleration with inverse mass and advance velocity:
+			//   a_i = F_i / m_i = F_i * w_i
+			//   v_i <- v_i + dt * a_i
+			const Vector3f acceleration = perVertexForce * invMass[vertex];
+			v[vertex] += dt * acceleration;
 		}
 	}
 }
@@ -1877,13 +2018,37 @@ unsigned int PBDSolver::getMaxSelfCollisionContactsPerVertex() const {
 	return maxSelfCollisionContactsPerVertex;
 }
 
-void PBDSolver::setBottomHalfWindAcceleration(float accelerationMagnitude) {
-	bottomHalfWindAcceleration = accelerationMagnitude * bottomHalfWindDirection;
+void PBDSolver::setWindConfig(const PBDWindConfig& config) {
+	windConfig = config;
+	if (windConfig.windDirection.squaredNorm() <= 1e-12f) {
+		windConfig.windDirection = Vector3f(1.0f, 0.0f, 0.0f);
+	}
+	else {
+		windConfig.windDirection.normalize();
+	}
+
+	windConfig.baseSpeed = std::max(0.0f, windConfig.baseSpeed);
+	windConfig.baseAcceleration = std::max(0.0f, windConfig.baseAcceleration);
+	windConfig.gustAmplitude = std::max(0.0f, windConfig.gustAmplitude);
+	windConfig.gustFrequency = std::max(0.0f, windConfig.gustFrequency);
+	windConfig.noiseStrength = std::max(0.0f, windConfig.noiseStrength);
+	windConfig.dragCoefficient = std::max(0.0f, windConfig.dragCoefficient);
+	windConfig.airDensity = std::max(0.0f, windConfig.airDensity);
+	windConfig.maxWindSpeed = std::max(0.0f, windConfig.maxWindSpeed);
+
+	if (windConfig.inputMode == PBDWindInputMode::Disabled) {
+		windSpeedState = 0.0f;
+	}
+	else if (windConfig.inputMode == PBDWindInputMode::Speed) {
+		windSpeedState = std::min(windConfig.baseSpeed, windConfig.maxWindSpeed);
+	}
+	else {
+		windSpeedState = 0.0f;
+	}
 }
 
-float PBDSolver::getBottomHalfWindAcceleration() const {
-	if (bottomHalfWindDirection.squaredNorm() <= 1e-12f) return 0.0f;
-	return bottomHalfWindAcceleration.dot(bottomHalfWindDirection);
+const PBDWindConfig& PBDSolver::getWindConfig() const {
+	return windConfig;
 }
 
 // -----------------------------

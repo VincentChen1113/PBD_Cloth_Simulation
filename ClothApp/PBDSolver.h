@@ -245,6 +245,25 @@ struct SelfCollisionDebugStats {
 	float maxRemainingPenetration = 0.0f;
 };
 
+enum class PBDWindInputMode {
+	Disabled,
+	Speed,
+	Acceleration
+};
+
+struct PBDWindConfig {
+	PBDWindInputMode inputMode = PBDWindInputMode::Disabled;
+	Eigen::Vector3f windDirection = Eigen::Vector3f(1.0f, 0.0f, 0.0f);
+	float baseSpeed = 0.0f;
+	float baseAcceleration = 0.0f;
+	float gustAmplitude = 0.0f;
+	float gustFrequency = 1.35f;
+	float noiseStrength = 0.0f;
+	float dragCoefficient = 1.15f;
+	float airDensity = 1.225f;
+	float maxWindSpeed = 15.0f;
+};
+
 // -----------------------------
 // PBD Solver
 // -----------------------------
@@ -300,9 +319,9 @@ private:
 	unsigned int maxSelfCollisionContactsPerVertex;
 	float velocitySleepThreshold;
 	Vector3f gravity;
-	Vector3f bottomHalfWindAcceleration;
-	Vector3f bottomHalfWindDirection;
-	float bottomHalfRestYThreshold;
+	PBDWindConfig windConfig;
+	float simulationTime;
+	float windSpeedState;
 
 	// -----------------------------
 	// 1. Constructor / Initialization
@@ -313,10 +332,17 @@ private:
 	// 3. Core PBD Pipeline Stages
 	// -----------------------------
 	void applyExternalForces(float dt);
+	void applyAerodynamicForces(float dt);
 	void dampVelocities();
 	void predictPositions(float dt);
 	void projectConstraints(const ConstraintList& constraints);
 	void updateVelocities(float dt);
+	bool isWindEnabled() const;
+	float triangleFaceArea(unsigned int i0, unsigned int i1, unsigned int i2) const;
+	Vector3f triangleFaceNormal(unsigned int i0, unsigned int i1, unsigned int i2) const;
+	Vector3f averageTriangleVelocity(unsigned int i0, unsigned int i1, unsigned int i2) const;
+	float currentWindSpeed(const Vector3f& triangleCenter, float dt);
+	float proceduralWindNoise(const Vector3f& triangleCenter) const;
 
 	// -----------------------------
 	// 5. Collision Handling
@@ -408,8 +434,8 @@ public:
 	float getSelfCollisionThickness() const;
 	void setMaxSelfCollisionContactsPerVertex(unsigned int maxContacts);
 	unsigned int getMaxSelfCollisionContactsPerVertex() const;
-	void setBottomHalfWindAcceleration(float accelerationMagnitude);
-	float getBottomHalfWindAcceleration() const;
+	void setWindConfig(const PBDWindConfig& config);
+	const PBDWindConfig& getWindConfig() const;
 
 	// -----------------------------
 	// 8. Debug / Diagnostics

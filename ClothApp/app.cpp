@@ -2,6 +2,7 @@
 #include <GL/glut.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <algorithm>
 #include <stdexcept>
 #include <iostream>
 #include <string>
@@ -79,16 +80,23 @@ static MassSpringSolver* g_solver;
 static pbd_system* g_pbdSystem;
 static PBDSolver* g_pbdSolver;
 static float g_selfCollisionThicknessOverride = -1.0f;
-static float g_bottomHalfWindAcceleration = 0.0f;
-static bool g_bottomHalfWindAccelerationProvided = false;
 static unsigned int g_pbdFrameCounter = 0u;
 static bool g_enableDebugDiagnostics = false;
+
+enum class WindCliMode {
+	None,
+	Speed
+};
+
+static WindCliMode g_windCliMode = WindCliMode::None;
+static float g_windSpeed = 0.0f;
 
 // Constraint Graph
 static CgRootNode* g_cgRootNode;
 
 // Scene parameters
 static const float g_camera_distance = 4.2f;
+static const float g_flag_camera_distance = 7.2f;
 
 // Scene matrices
 static glm::mat4 g_ModelViewMatrix;
@@ -119,20 +127,34 @@ namespace PBDSystemParam {
 	static const float a = 0.02f; // damping factor
 	static const float eps = 1e-4f; // collision epsilon
 	static const float k_stretch = 0.9f; // stretch stiffness | 1.0f
-	static const float k_shear = 0.5f; // shear stiffness | 0.8f
+	static const float k_shear = 0.8f; // shear stiffness | 0.8f
 	static const float k_bend = 0.01f; // bend stiffness | 0.01f
 	static const float sphere_radius = 0.64f;  // radius of sphere collider in drop demo | 0.64f
 }
 
 namespace PBDFloorDemoParam {
-	static const float h = 0.003f;
-	static const int n_iter = 28;
-	static const float selfCollisionStiffness = 0.45; // 0.45
-	static const unsigned int maxSelfCollisionContactsPerVertex = 4u; // 4u
+	static const float h = 0.003f; // Smaller time step for floor-contact stability.
+	static const int n_iter = 28; // More solver iterations to resolve floor/self contacts robustly.
+	static const float selfCollisionStiffness = 0.45f; // Extra stiffness for self-collision corrections in floor demos.
+	static const unsigned int maxSelfCollisionContactsPerVertex = 4u; // Cap on generated self-collision contacts per vertex.
 }
 
 namespace PBDDebugParam {
 	static const unsigned int debugPrintPeriod = 20u;
+}
+
+namespace PBDWindCliParam {
+	static const float minValue = 0.0f; // Safe lower bound for user-provided --wind-speed.
+	static const float maxValue = 15.0f; // Safe upper bound for user-provided --wind-speed.
+	static const glm::vec3 windDirection(1.0f, 0.0f, 0.0f); // wind direction
+	static const float gustFraction = 0.30f; // Gust amplitude scale, used in A_gust = gustFraction * userWindValue.
+	static const float gustFrequency = 1.35f; // Gust frequency in u(t) = u_base + A_gust * sin(2 * pi * gustFrequency * t) + noise(t, x).
+	static const float noiseFraction = 0.08f; // Small procedural flutter scale added to u(t) after the sinusoidal gust term.
+	static const float dragCoefficient = 1.15f; // Drag coefficient C_D in F_drag = 0.5 * rho * C_D * A * |v_rel|^2 * exposure.
+	static const float airDensity = 1.225f; // Air density rho used by the drag-only aerodynamic force.
+	static const float dampingFactor = 0.06f; // Velocity damping for the wind demo to keep flutter stable.
+	static const float bendStiffness = 0.008f; // Softer bending stiffness so the flag can ripple under gusts.
+	static const float flagHeightOffset = 1.15f; // Vertical lift applied when rotating the cloth into the flag pose.
 }
 // F U N C T I O N S //////////////////////////////////////////////////////////////
 // state initialization
@@ -152,6 +174,7 @@ static void initMouseInteraction(FixedPointController*, unsigned int);
 static glm::mat4 floorShadowMatrix(float planeHeight, const glm::vec3& lightDirection);
 static void orientClothForFloorDrop();
 static void orientClothFlatForDualFloorDrop();
+static void orientClothForWindFlag();
 static void logPBDSelfCollisionDiagnostics();
 static bool isPBDMode();
 static bool hasSphereColliderVisual();
@@ -198,6 +221,10 @@ static void(*g_demo)() = demo_hang;
 
 static bool isFloorDemo() {
 	return g_mode == SimMode::PBDDropFloor || g_mode == SimMode::PBDDropFloorDual;
+}
+
+static bool hasSceneFloor() {
+	return isFloorDemo() || g_mode == SimMode::PBDHangWind;
 }
 
 static bool hasSphereColliderVisual() {
@@ -368,7 +395,7 @@ static void parseSimMode(int argc, char** argv) {
 	}
 
 	throw std::runtime_error(
-		"Usage: ./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug], ./fast-mass-spring pbd [hang|hang_wind|drop|drop-floor|drop-floor-dual] [--self-thickness value] [--debug] [--wind-accel value], or ./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang_wind|pbd-drop|pbd-drop-floor|pbd-drop-floor-dual] [--self-thickness value] [--debug] [--wind-accel value]"
+		"Usage: ./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug], ./fast-mass-spring pbd [hang|hang-wind|drop|drop-floor|drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value], or ./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang-wind|pbd-drop|pbd-drop-floor|pbd-drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value]"
 	);
 }
 
@@ -396,23 +423,28 @@ static void parseOptionalArgs(int argc, char** argv, int startIndex) {
 			continue;
 		}
 
-		if (arg == "--wind-accel") {
+		if (arg == "--wind-speed") {
 			if (g_mode != SimMode::PBDHangWind) {
-				throw std::runtime_error("--wind-accel is only valid for the pbd hang_wind demo");
+				throw std::runtime_error("--wind-speed is only valid for the pbd hang-wind demo");
 			}
 			if (i + 1 >= argc) {
-				throw std::runtime_error("Missing value after --wind-accel");
+				throw std::runtime_error("Missing value after --wind-speed");
+			}
+			if (g_windCliMode != WindCliMode::None) {
+				throw std::runtime_error("Specify --wind-speed only once");
 			}
 
 			std::stringstream valueStream(argv[++i]);
-			float acceleration = 0.0f;
-			valueStream >> acceleration;
-			if (!valueStream || !valueStream.eof() || acceleration < -15.0f || acceleration > 15.0f) {
-				throw std::runtime_error("--wind-accel expects a float value in [-15, 15]");
+			float windSpeed = 0.0f;
+			valueStream >> windSpeed;
+			if (!valueStream || !valueStream.eof()
+				|| windSpeed < PBDWindCliParam::minValue
+				|| windSpeed > PBDWindCliParam::maxValue) {
+				throw std::runtime_error("--wind-speed expects a float value in [0, 15]");
 			}
 
-			g_bottomHalfWindAcceleration = acceleration;
-			g_bottomHalfWindAccelerationProvided = true;
+			g_windCliMode = WindCliMode::Speed;
+			g_windSpeed = windSpeed;
 			continue;
 		}
 
@@ -421,8 +453,8 @@ static void parseOptionalArgs(int argc, char** argv, int startIndex) {
 }
 
 static void validateParsedOptions() {
-	if (g_mode == SimMode::PBDHangWind && !g_bottomHalfWindAccelerationProvided) {
-		throw std::runtime_error("The pbd hang_wind demo requires --wind-accel with a value in [-15, 15]");
+	if (g_mode == SimMode::PBDHangWind && g_windCliMode == WindCliMode::None) {
+		throw std::runtime_error("The pbd hang-wind demo requires --wind-speed with a value in [0, 15]");
 	}
 }
 
@@ -705,9 +737,15 @@ static glm::mat4 floorShadowMatrix(float planeHeight, const glm::vec3& lightDire
 }
 
 static void initScene() {
+	const float cameraDistance = (g_mode == SimMode::PBDHangWind)
+		? g_flag_camera_distance
+		: g_camera_distance;
+	const glm::vec3 focusPoint = (g_mode == SimMode::PBDHangWind)
+		? glm::vec3(0.0f, 0.0f, PBDWindCliParam::flagHeightOffset + activeClothWidth() / 4.0f)
+		: glm::vec3(0.0f, 0.0f, -1.0f);
 	g_ModelViewMatrix = glm::lookAt(
-		glm::vec3(0.618, -0.786, 0.3f) * g_camera_distance,
-		glm::vec3(0.0f, 0.0f, -1.0f),
+		glm::vec3(0.618, -0.786, 0.3f) * cameraDistance,
+		focusPoint,
 		glm::vec3(0.0f, 0.0f, 1.0f)
 	) * glm::translate(glm::mat4(1), glm::vec3(0.0f, 0.0f, activeClothWidth() / 4));
 	updateProjection();
@@ -751,6 +789,26 @@ static void orientClothFlatForDualFloorDrop() {
 
 	for (unsigned int i = 0; i < vertexCount; ++i) {
 		positions[3 * i + 2] = targetHeight;
+	}
+
+	g_clothMesh->request_face_normals();
+	g_clothMesh->update_normals();
+	g_clothMesh->release_face_normals();
+	updateRenderTarget();
+}
+
+static void orientClothForWindFlag() {
+	if (g_clothMesh == nullptr || g_render_target == nullptr) return;
+
+	float* const positions = g_clothMesh->vbuff();
+	const unsigned int vertexCount = g_clothMesh->n_vertices();
+	for (unsigned int i = 0; i < vertexCount; ++i) {
+		const float x = positions[3 * i + 0];
+		const float y = positions[3 * i + 1];
+
+		positions[3 * i + 0] = 0.0f;
+		positions[3 * i + 1] = x;
+		positions[3 * i + 2] = y + PBDWindCliParam::flagHeightOffset;
 	}
 
 	g_clothMesh->request_face_normals();
@@ -923,6 +981,7 @@ static void demo_pbd_hang() {
 
 static void demo_pbd_hang_wind() {
 	const unsigned int n = PBDSystemParam::n;
+	orientClothForWindFlag();
 
 	MassSpringBuilder builder;
 	builder.uniformGrid(
@@ -942,12 +1001,43 @@ static void demo_pbd_hang_wind() {
 	if (g_selfCollisionThicknessOverride > 0.0f) {
 		g_pbdSolver->setSelfCollisionThickness(g_selfCollisionThicknessOverride);
 	}
-	g_pbdSolver->setBottomHalfWindAcceleration(g_bottomHalfWindAcceleration);
+	PBDWindConfig windConfig;
+	windConfig.inputMode = PBDWindInputMode::Speed;
+	windConfig.windDirection = Eigen::Vector3f(
+		PBDWindCliParam::windDirection.x,
+		PBDWindCliParam::windDirection.y,
+		PBDWindCliParam::windDirection.z
+	);
+	windConfig.baseSpeed = g_windSpeed;
+	windConfig.baseAcceleration = 0.0f;
+	const float gustReference = g_windSpeed;
+	windConfig.gustAmplitude = PBDWindCliParam::gustFraction * gustReference;
+	windConfig.gustFrequency = PBDWindCliParam::gustFrequency;
+	windConfig.noiseStrength = PBDWindCliParam::noiseFraction * gustReference;
+	windConfig.dragCoefficient = PBDWindCliParam::dragCoefficient;
+	windConfig.airDensity = PBDWindCliParam::airDensity;
+	windConfig.maxWindSpeed = PBDWindCliParam::maxValue;
+	g_pbdSolver->setWindConfig(windConfig);
+	g_pbdSolver->setDampingFactor(PBDWindCliParam::dampingFactor);
 	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), PBDSystemParam::k_stretch);
 	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
-	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDSystemParam::k_bend);
-	g_pbdSolver->pinPoint(0);
-	g_pbdSolver->pinPoint(n - 1);
+	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDWindCliParam::bendStiffness);
+	for (unsigned int row = 0; row < n; ++row) {
+		g_pbdSolver->pinPoint(row * n);
+	}
+	std::cout
+		<< "[pbd hang-wind] "
+		<< "wind-speed="
+		<< g_windSpeed
+		<< ", direction=(" << PBDWindCliParam::windDirection.x << ", "
+		<< PBDWindCliParam::windDirection.y << ", "
+		<< PBDWindCliParam::windDirection.z << ")"
+		<< ", gust-amplitude=" << windConfig.gustAmplitude
+		<< ", gust-frequency=" << windConfig.gustFrequency
+		<< ", noise-strength=" << windConfig.noiseStrength
+		<< ", Cd=" << windConfig.dragCoefficient
+		<< ", rho=" << windConfig.airDensity
+		<< std::endl;
 	g_pbdFrameCounter = 0u;
 	initMouseInteraction(g_pbdSolver, n);
 }
@@ -1077,7 +1167,7 @@ static void demo_pbd_drop_floor_dual() {
 // G L U T  C A L L B A C K S //////////////////////////////////////////////////////
 static void display() {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	if (isFloorDemo()) {
+	if (hasSceneFloor()) {
 		drawFloor();
 		drawFloorShadows();
 	}
@@ -1180,7 +1270,7 @@ static void drawFloor() {
 }
 
 static void drawFloorShadows() {
-	if (!isFloorDemo() || g_shadowShader == nullptr) return;
+	if (!hasSceneFloor() || g_shadowShader == nullptr) return;
 
 	const float shadowPlaneHeight = g_floor_collision_height + g_floor_render_offset + 1e-3f;
 	const glm::mat4 shadowModelView = g_ModelViewMatrix * floorShadowMatrix(shadowPlaneHeight, glm::normalize(g_light));

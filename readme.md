@@ -50,6 +50,7 @@ The current PBD solver includes:
 - sphere and plane collision as generated inequality constraints
 - self-collision detection and resolution with debug counters
 - a dedicated `drop-floor` scene for floor interaction and tuning
+- a dedicated `drop-floor-dual` scene for cloth interaction with both a sphere and a box obstacle on the floor
 - a `hang-wind` scene with triangle-based aerodynamic drag and lift, gust modulation, and procedural flutter noise
 
 ### Demo
@@ -60,6 +61,7 @@ Available runtime scenes:
 - `pbd hang-wind`
 - `pbd drop`
 - `pbd drop-floor`
+- `pbd drop-floor-dual`
 
 ### Wind Demo
 
@@ -133,6 +135,7 @@ Examples:
 ./fast-mass-spring pbd-hang-wind --wind-speed 8
 ./fast-mass-spring pbd drop
 ./fast-mass-spring pbd drop-floor
+./fast-mass-spring pbd drop-floor-dual
 ./fast-mass-spring pbd drop-floor --self-thickness 0.02
 ./fast-mass-spring pbd drop-floor --debug
 ```

@@ -49,6 +49,8 @@ static const glm::vec4 g_shadow_color(0.0f, 0.0f, 0.0f, 0.32f);
 static const float g_floor_collision_height = -1.75f;
 static const float g_floor_render_offset = -0.002f;
 static const float g_floor_extent = 3.5f;
+static const float g_mouse_drag_tolerance_scale = 0.75f;
+static const float g_mouse_drag_tolerance_min = 0.6f;
 
 // Shader Handles
 static PhongShader* g_phongShader; // linked phong shader
@@ -172,6 +174,7 @@ static void initSphereColliderVisual(float radius, const glm::vec3& center); // 
 static void initCubeColliderVisual(const glm::vec3& center, const glm::vec3& halfExtents); // Generate cube collider mesh
 static void initScene(); // Generate scene matrices
 static void initMouseInteraction(FixedPointController*, unsigned int);
+static glm::vec3 dragClampTolerance();
 static glm::mat4 floorShadowMatrix(float planeHeight, const glm::vec3& lightDirection);
 static void orientClothForFloorDrop();
 static void orientClothFlatForDualFloorDrop();
@@ -500,6 +503,14 @@ static float activeClothWidth() {
 	return isPBDMode() ? PBDSystemParam::w : SystemParam::w;
 }
 
+static glm::vec3 dragClampTolerance() {
+	const float tolerance = std::max(
+		g_mouse_drag_tolerance_min,
+		g_mouse_drag_tolerance_scale * activeClothWidth()
+	);
+	return glm::vec3(tolerance);
+}
+
 static void initShaders() {
 	GLShader basic_vert(GL_VERTEX_SHADER);
 	GLShader phong_frag(GL_FRAGMENT_SHADER);
@@ -825,6 +836,25 @@ static void initMouseInteraction(FixedPointController* mouseFixer, unsigned int 
 	g_pickRenderer->setElementCount(g_clothMesh->ibuffLen());
 	g_pickShader->setTessFact(n);
 	UI = new GridMeshUI(g_pickRenderer, mouseFixer, g_clothMesh->vbuff(), n);
+
+	float* const positions = g_clothMesh->vbuff();
+	const unsigned int vertexCount = g_clothMesh->n_vertices();
+	if (positions != nullptr && vertexCount > 0u) {
+		glm::vec3 minBounds(positions[0], positions[1], positions[2]);
+		glm::vec3 maxBounds = minBounds;
+		for (unsigned int vertex = 1u; vertex < vertexCount; ++vertex) {
+			const glm::vec3 position(
+				positions[3 * vertex + 0],
+				positions[3 * vertex + 1],
+				positions[3 * vertex + 2]
+			);
+			minBounds = glm::min(minBounds, position);
+			maxBounds = glm::max(maxBounds, position);
+		}
+
+		const glm::vec3 tolerance = dragClampTolerance();
+		UI->setDragBounds(minBounds - tolerance, maxBounds + tolerance);
+	}
 }
 
 static pbd_system* buildPBDSystem(const mass_spring_system& system) {

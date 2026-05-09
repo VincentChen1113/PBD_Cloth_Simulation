@@ -134,6 +134,28 @@ Short-form mode selection:
 ./fast-mass-spring pbd-hang-wind --wind-speed 8
 ```
 
+### Demo Gallery
+
+#### Hang Demo
+
+![Hang demo](Demos/Hang_trim.gif)
+
+#### Wind Flag Demo
+
+![Wind flag demo](Demos/Flag_trim.gif)
+
+#### Sphere Drop Demo
+
+![Sphere drop demo](Demos/Drop_sphere_trim.gif)
+
+#### Floor Drop Demo
+
+![Floor drop demo](Demos/Drop_floor_trim.gif)
+
+#### Dual-Obstacle Demo
+
+![Dual-obstacle demo](Demos/Dual_trim.gif)
+
 ---
 
 ## Controls and Runtime Interface
@@ -393,7 +415,7 @@ This is a lightweight approximation inspired by the aerodynamic force model in K
 
 ## Demo Notes
 
-### Fast Mass-Spring Baseline
+### Fast Mass-Spring System
 
 The original solver from the forked repository is based on Liu et al. [1]. It is preserved for comparison with the PBD solver.
 

@@ -1,3 +1,7 @@
+// ============================================================
+// 1. Includes and Global Constants
+// ============================================================
+
 #include <GL/glew.h>
 #include <GL/glut.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -19,16 +23,18 @@
 #include "PBDSolver.h"
 #include "UserInteraction.h"
 
-// G L O B A L S ///////////////////////////////////////////////////////////////////
+// ============================================================
+// 2. Global Runtime State
+// ============================================================
 
-// Window
+// Window and pointer input state.
 static int g_windowWidth = 1280, g_windowHeight = 1280;
 static bool g_mouseClickDown = false;
 static bool g_mouseLClickButton, g_mouseRClickButton, g_mouseMClickButton;
 static int g_mouseClickX;
 static int g_mouseClickY;
 
-// User Interaction
+// Shared UI picking and reusable collider visuals.
 static UserInteraction* UI;
 static Renderer* g_pickRenderer;
 static ProgramInput* g_floor_target;
@@ -37,7 +43,7 @@ static unsigned int g_sphere_index_count = 0u;
 static ProgramInput* g_cube_target;
 static unsigned int g_cube_index_count = 0u;
 
-// Constants
+// Rendering constants and shared scene colors.
 static const float PI = glm::pi<float>();
 static const glm::vec3 g_floor_albedo(0.55f, 0.55f, 0.58f);
 static const glm::vec3 g_floor_ambient(0.04f, 0.04f, 0.04f);
@@ -52,33 +58,32 @@ static const float g_floor_collision_height = -1.75f;
 static const float g_floor_render_offset = -0.002f;
 static const float g_floor_extent = 3.5f;
 
-// Shader Handles
+// Shader handles.
 static PhongShader* g_phongShader; // linked phong shader
 static ShadowShader* g_shadowShader; // linked shadow shader
 static PickShader* g_pickShader; // linked pick shader
 
-// Shader parameters
+// Shader material/light parameters.
 static const glm::vec3 g_albedo(0.0f, 0.3f, 0.7f);
 static const glm::vec3 g_ambient(0.01f, 0.01f, 0.01f);
 static const glm::vec3 g_light(1.0f, 1.0f, -1.0f);
 
-// Mesh
+// Mesh and render buffer state.
 static Mesh* g_clothMesh; // halfedge data structure
 
-// Render Target
 static ProgramInput* g_render_target; // vertex, normal, texutre, index
 
-// Animation
+// Animation timing for the legacy mass-spring path.
 static const int g_fps = 60; // frames per second  | 60
 static const int g_iter = 5; // iterations per time step | 10
 static const int g_frame_time = 15; // approximate time for frame calculations | 15
 static const int g_animation_timer = (int) ((1.0f / g_fps) * 1000 - g_frame_time);
 
-// Mass Spring System
+// Mass-spring runtime objects.
 static mass_spring_system* g_system;
 static MassSpringSolver* g_solver;
 
-// PBD System
+// PBD runtime objects and shared debug flags.
 static pbd_system* g_pbdSystem;
 static PBDSolver* g_pbdSolver;
 static float g_selfCollisionThicknessOverride = -1.0f;
@@ -90,6 +95,7 @@ enum class WindCliMode {
 	Speed
 };
 
+// CLI overrides and startup argument state.
 static WindCliMode g_windCliMode = WindCliMode::None;
 static float g_windSpeed = 0.0f;
 static bool g_windDirectionCliProvided = false;
@@ -100,16 +106,20 @@ static unsigned int g_pbdFloorIterationsOverride = 0u;
 static unsigned int g_pbdDualIterationsOverride = 0u;
 static float g_pbdFloorTimestepOverride = -1.0f;
 
-// Constraint Graph
+// Constraint graph for the legacy mass-spring path.
 static CgRootNode* g_cgRootNode;
 
-// Scene parameters
+// Camera / scene framing parameters.
 static const float g_camera_distance = 4.2f;
 static const float g_flag_camera_distance = 7.2f;
 
-// Scene matrices
+// Scene matrices.
 static glm::mat4 g_ModelViewMatrix;
 static glm::mat4 g_ProjectionMatrix;
+
+// ============================================================
+// 3. Demo Parameter Namespaces
+// ============================================================
 
 // System parameters for fast-mass-spring
 namespace SystemParam {
@@ -285,6 +295,10 @@ namespace PBDWindControlParam {
 	static const float verticalWarningThreshold = 0.35f;
 }
 
+// ============================================================
+// 4. Runtime State Structs
+// ============================================================
+
 struct PBDHangRuntimeState {
 	bool initialized = false;
 	bool paused = false;
@@ -364,14 +378,26 @@ struct PBDDualRuntimeState {
 
 static PBDDualRuntimeState g_pbdDualRuntime;
 
-// F U N C T I O N S //////////////////////////////////////////////////////////////
-// state initialization
+// ============================================================
+// 5. Forward Declarations
+// ============================================================
+
+// CLI parsing and validation.
 static void initGlutState(int, char**);
 static void initGLState();
 static void parseSimMode(int, char**);
 static void parseOptionalArgs(int argc, char** argv, int startIndex);
 static void validateParsedOptions();
+static const char* usageMessage();
+static bool tryParseSingleTokenMode(int argc, char** argv);
+static bool tryParseTwoTokenMode(int argc, char** argv);
+static bool parseSharedOption(int argc, char** argv, int& index);
+static bool parseWindOption(int argc, char** argv, int& index);
+static bool parseIterationOption(int argc, char** argv, int& index);
+static bool parseFloorOption(int argc, char** argv, int& index);
+static bool parseDropOption(int argc, char** argv, int& index);
 
+// OpenGL / GLUT initialization and asset setup.
 static void initShaders(); // Read, compile and link shaders
 static void initCloth(); // Generate cloth mesh
 static void initFloor(); // Generate floor mesh
@@ -380,18 +406,27 @@ static void initCubeColliderVisual(const glm::vec3& center, const glm::vec3& hal
 static void initScene(); // Generate scene matrices
 static void initMouseInteraction(FixedPointController*, unsigned int);
 static void rebuildClothMesh(unsigned int resolution);
+static void clearMouseButtonState();
+
+// Wind helpers.
 static Eigen::Vector3f normalizedWindDirectionOrFallback(const Eigen::Vector3f& direction, const Eigen::Vector3f& fallback, bool* usedFallback = nullptr);
 static PBDWindConfig makeWindConfig(float windSpeed, const Eigen::Vector3f& direction);
 static void configurePBDWindSolver(float windSpeed, const Eigen::Vector3f& directionInput, bool captureDefaults);
 static void applyPBDWindSettings(float windSpeed, const Eigen::Vector3f& directionInput);
 static void resetPBDWindDemo(bool resetParameters);
 static void logPBDWindControlState(const std::string& reason);
+
+// Hang helpers.
 static void logPBDHangControlState(const std::string& reason);
+
+// Drop helpers.
 static unsigned int previousPBDDropResolution(unsigned int resolution);
 static unsigned int nextPBDDropResolution(unsigned int resolution);
 static void configurePBDDropSolver(float stretch, float shear, float bend, float damping, unsigned int iterations, float sphereRadius, unsigned int meshResolution, bool captureDefaults);
 static void resetPBDDropDemo(bool resetParameters);
 static void logPBDDropControlState(const std::string& reason);
+
+// Drop-floor helpers.
 static unsigned int previousPBDFloorResolution(unsigned int resolution);
 static unsigned int nextPBDFloorResolution(unsigned int resolution);
 static int closestPBDFloorSpeedPreset(float dt);
@@ -410,6 +445,8 @@ static void configurePBDFloorSolver(
 );
 static void resetPBDFloorDemo(bool resetParameters);
 static void logPBDFloorControlState(const std::string& reason);
+
+// Drop-floor-dual helpers.
 static unsigned int previousPBDDualResolution(unsigned int resolution);
 static unsigned int nextPBDDualResolution(unsigned int resolution);
 static void setPBDDualRuntimeTimestep(float dt, int presetIndex, bool custom);
@@ -426,6 +463,8 @@ static void configurePBDDualSolver(
 );
 static void resetPBDDualDemo(bool resetParameters);
 static void logPBDDualControlState(const std::string& reason);
+
+// Overlay / text helpers.
 static void drawBitmapText(float x, float y, const std::string& text);
 static void drawWindDirectionIndicator(const Eigen::Vector3f& normalizedDirection);
 static void drawPBDHangOverlay();
@@ -444,6 +483,11 @@ static bool hasCubeColliderVisual();
 static unsigned int activeGridSize();
 static float activeClothWidth();
 static pbd_system* buildPBDSystem(const mass_spring_system& system);
+static bool handlePBDWindKey(unsigned char key);
+static bool handlePBDHangKey(unsigned char key);
+static bool handlePBDDropKey(unsigned char key);
+static bool handlePBDFloorKey(unsigned char key);
+static bool handlePBDDualKey(unsigned char key);
 
 struct AnalyticBoxDefinition {
 	glm::vec3 center;
@@ -548,7 +592,18 @@ void checkGlErrors();
 
 
 
-// M A I N //////////////////////////////////////////////////////////////////////////
+// ============================================================
+// 6. CLI Parsing and Validation
+// ============================================================
+
+static const char* usageMessage() {
+	return "Usage: ./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug], ./fast-mass-spring pbd hang [--iters value] [--self-thickness value] [--debug], ./fast-mass-spring pbd hang-wind [--wind-speed value] [--wind-dir x y z] [--self-thickness value] [--debug], ./fast-mass-spring pbd drop [--radius value] [--iters value] [--self-thickness value] [--debug], ./fast-mass-spring pbd drop-floor [--iters value] [--dt value] [--self-thickness value] [--debug], ./fast-mass-spring pbd drop-floor-dual [--iters value] [--self-thickness value] [--debug], or ./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang-wind|pbd-drop|pbd-drop-floor|pbd-drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value] [--wind-dir x y z] [--iters value]";
+}
+
+// ============================================================
+// 7. OpenGL / GLUT Initialization
+// ============================================================
+
 int main(int argc, char** argv) {
 	try {
 		parseSimMode(argc, argv);
@@ -575,259 +630,288 @@ int main(int argc, char** argv) {
 	}
 }
 
-
-// S T A T E  I N I T I A L I Z A T O N /////////////////////////////////////////////
-static void parseSimMode(int argc, char** argv) {
-	if (argc <= 1) return;
+static bool tryParseSingleTokenMode(int argc, char** argv) {
+	if (argc <= 1) return false;
 
 	const std::string arg1(argv[1]);
 	if (arg1 == "mass-spring-hang" || arg1 == "ms-hang") {
 		g_mode = SimMode::MassSpringHang;
 		parseOptionalArgs(argc, argv, 2);
-		return;
+		return true;
 	}
 	if (arg1 == "mass-spring-drop" || arg1 == "ms-drop") {
 		g_mode = SimMode::MassSpringDrop;
 		parseOptionalArgs(argc, argv, 2);
-		return;
+		return true;
 	}
 	if (arg1 == "pbd-hang") {
 		g_mode = SimMode::PBDHang;
 		parseOptionalArgs(argc, argv, 2);
-		return;
+		return true;
 	}
 	if (arg1 == "pbd-hang_wind" || arg1 == "pbd-hang-wind") {
 		g_mode = SimMode::PBDHangWind;
 		parseOptionalArgs(argc, argv, 2);
-		return;
+		return true;
 	}
 	if (arg1 == "pbd-drop") {
 		g_mode = SimMode::PBDDrop;
 		parseOptionalArgs(argc, argv, 2);
-		return;
+		return true;
 	}
 	if (arg1 == "pbd-drop-floor") {
 		g_mode = SimMode::PBDDropFloor;
 		parseOptionalArgs(argc, argv, 2);
-		return;
+		return true;
 	}
 	if (arg1 == "pbd-drop-floor-dual") {
 		g_mode = SimMode::PBDDropFloorDual;
 		parseOptionalArgs(argc, argv, 2);
-		return;
+		return true;
 	}
 
-	if (argc >= 3) {
-		const std::string solver(argv[1]);
-		const std::string scene(argv[2]);
-		if ((solver == "mass-spring" || solver == "ms") && scene == "hang") {
-			g_mode = SimMode::MassSpringHang;
-			parseOptionalArgs(argc, argv, 3);
-			return;
-		}
-		if ((solver == "mass-spring" || solver == "ms") && scene == "drop") {
-			g_mode = SimMode::MassSpringDrop;
-			parseOptionalArgs(argc, argv, 3);
-			return;
-		}
-		if (solver == "pbd" && scene == "hang") {
-			g_mode = SimMode::PBDHang;
-			parseOptionalArgs(argc, argv, 3);
-			return;
-		}
-		if (solver == "pbd" && (scene == "hang_wind" || scene == "hang-wind")) {
-			g_mode = SimMode::PBDHangWind;
-			parseOptionalArgs(argc, argv, 3);
-			return;
-		}
-		if (solver == "pbd" && scene == "drop") {
-			g_mode = SimMode::PBDDrop;
-			parseOptionalArgs(argc, argv, 3);
-			return;
-		}
-		if (solver == "pbd" && scene == "drop-floor") {
-			g_mode = SimMode::PBDDropFloor;
-			parseOptionalArgs(argc, argv, 3);
-			return;
-		}
-		if (solver == "pbd" && scene == "drop-floor-dual") {
-			g_mode = SimMode::PBDDropFloorDual;
-			parseOptionalArgs(argc, argv, 3);
-			return;
-		}
+	return false;
+}
+
+static bool tryParseTwoTokenMode(int argc, char** argv) {
+	if (argc < 3) return false;
+
+	const std::string solver(argv[1]);
+	const std::string scene(argv[2]);
+	if ((solver == "mass-spring" || solver == "ms") && scene == "hang") {
+		g_mode = SimMode::MassSpringHang;
+		parseOptionalArgs(argc, argv, 3);
+		return true;
+	}
+	if ((solver == "mass-spring" || solver == "ms") && scene == "drop") {
+		g_mode = SimMode::MassSpringDrop;
+		parseOptionalArgs(argc, argv, 3);
+		return true;
+	}
+	if (solver == "pbd" && scene == "hang") {
+		g_mode = SimMode::PBDHang;
+		parseOptionalArgs(argc, argv, 3);
+		return true;
+	}
+	if (solver == "pbd" && (scene == "hang_wind" || scene == "hang-wind")) {
+		g_mode = SimMode::PBDHangWind;
+		parseOptionalArgs(argc, argv, 3);
+		return true;
+	}
+	if (solver == "pbd" && scene == "drop") {
+		g_mode = SimMode::PBDDrop;
+		parseOptionalArgs(argc, argv, 3);
+		return true;
+	}
+	if (solver == "pbd" && scene == "drop-floor") {
+		g_mode = SimMode::PBDDropFloor;
+		parseOptionalArgs(argc, argv, 3);
+		return true;
+	}
+	if (solver == "pbd" && scene == "drop-floor-dual") {
+		g_mode = SimMode::PBDDropFloorDual;
+		parseOptionalArgs(argc, argv, 3);
+		return true;
 	}
 
-	throw std::runtime_error(
-		"Usage: ./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug], ./fast-mass-spring pbd hang [--iters value] [--self-thickness value] [--debug], ./fast-mass-spring pbd hang-wind [--wind-speed value] [--wind-dir x y z] [--self-thickness value] [--debug], ./fast-mass-spring pbd drop [--radius value] [--iters value] [--self-thickness value] [--debug], ./fast-mass-spring pbd drop-floor [--iters value] [--dt value] [--self-thickness value] [--debug], ./fast-mass-spring pbd drop-floor-dual [--iters value] [--self-thickness value] [--debug], or ./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang-wind|pbd-drop|pbd-drop-floor|pbd-drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value] [--wind-dir x y z] [--iters value]"
-	);
+	return false;
+}
+
+static void parseSimMode(int argc, char** argv) {
+	if (argc <= 1) return;
+	if (tryParseSingleTokenMode(argc, argv)) return;
+	if (tryParseTwoTokenMode(argc, argv)) return;
+	throw std::runtime_error(usageMessage());
+}
+
+static bool parseSharedOption(int argc, char** argv, int& index) {
+	const std::string arg(argv[index]);
+	if (arg == "--debug") {
+		g_enableDebugDiagnostics = true;
+		return true;
+	}
+
+	if (arg != "--self-thickness") {
+		return false;
+	}
+	if (index + 1 >= argc) {
+		throw std::runtime_error("Missing value after --self-thickness");
+	}
+
+	std::stringstream valueStream(argv[++index]);
+	float thickness = -1.0f;
+	valueStream >> thickness;
+	if (!valueStream || !valueStream.eof() || thickness <= 0.0f) {
+		throw std::runtime_error("--self-thickness expects a positive float value");
+	}
+
+	g_selfCollisionThicknessOverride = thickness;
+	return true;
+}
+
+static bool parseWindOption(int argc, char** argv, int& index) {
+	const std::string arg(argv[index]);
+	if (arg == "--wind-speed") {
+		if (g_mode != SimMode::PBDHangWind) {
+			throw std::runtime_error("--wind-speed is only valid for the pbd hang-wind demo");
+		}
+		if (index + 1 >= argc) {
+			throw std::runtime_error("Missing value after --wind-speed");
+		}
+		if (g_windCliMode != WindCliMode::None) {
+			throw std::runtime_error("Specify --wind-speed only once");
+		}
+
+		std::stringstream valueStream(argv[++index]);
+		float windSpeed = 0.0f;
+		valueStream >> windSpeed;
+		if (!valueStream || !valueStream.eof()
+			|| windSpeed < PBDWindCliParam::minValue
+			|| windSpeed > PBDWindCliParam::maxValue) {
+			throw std::runtime_error("--wind-speed expects a float value in [0, 15]");
+		}
+
+		g_windCliMode = WindCliMode::Speed;
+		g_windSpeed = windSpeed;
+		return true;
+	}
+
+	if (arg != "--wind-dir") {
+		return false;
+	}
+	if (g_mode != SimMode::PBDHangWind) {
+		throw std::runtime_error("--wind-dir is only valid for the pbd hang-wind demo");
+	}
+	if (index + 3 >= argc) {
+		throw std::runtime_error("--wind-dir expects three float values: x y z");
+	}
+	if (g_windDirectionCliProvided) {
+		throw std::runtime_error("Specify --wind-dir only once");
+	}
+
+	std::stringstream xStream(argv[++index]);
+	std::stringstream yStream(argv[++index]);
+	std::stringstream zStream(argv[++index]);
+	float x = 0.0f;
+	float y = 0.0f;
+	float z = 0.0f;
+	xStream >> x;
+	yStream >> y;
+	zStream >> z;
+	if (!xStream || !xStream.eof() || !yStream || !yStream.eof() || !zStream || !zStream.eof()) {
+		throw std::runtime_error("--wind-dir expects three float values: x y z");
+	}
+
+	const Eigen::Vector3f direction(x, y, z);
+	if (direction.norm() < PBDWindCliParam::minDirectionNorm) {
+		throw std::runtime_error("--wind-dir expects a non-zero vector");
+	}
+
+	g_windDirection = direction;
+	g_windDirectionCliProvided = true;
+	return true;
+}
+
+static bool parseIterationOption(int argc, char** argv, int& index) {
+	const std::string arg(argv[index]);
+	if (arg != "--iters") {
+		return false;
+	}
+	if (g_mode != SimMode::PBDHang && g_mode != SimMode::PBDDrop && g_mode != SimMode::PBDDropFloor && g_mode != SimMode::PBDDropFloorDual) {
+		throw std::runtime_error("--iters is only valid for the pbd hang, pbd drop, pbd drop-floor, or pbd drop-floor-dual demo");
+	}
+	if (index + 1 >= argc) {
+		throw std::runtime_error("Missing value after --iters");
+	}
+	if ((g_mode == SimMode::PBDHang && g_pbdHangIterationsOverride != 0u)
+		|| (g_mode == SimMode::PBDDrop && g_pbdDropIterationsOverride != 0u)
+		|| (g_mode == SimMode::PBDDropFloor && g_pbdFloorIterationsOverride != 0u)
+		|| (g_mode == SimMode::PBDDropFloorDual && g_pbdDualIterationsOverride != 0u)) {
+		throw std::runtime_error("Specify --iters only once");
+	}
+
+	std::stringstream valueStream(argv[++index]);
+	int iterations = 0;
+	valueStream >> iterations;
+	if (!valueStream || !valueStream.eof()
+		|| iterations < static_cast<int>(PBDHangCliParam::minIterations)
+		|| iterations > static_cast<int>(PBDHangCliParam::maxIterations)) {
+		throw std::runtime_error("--iters expects an integer value in [1, 80]");
+	}
+
+	if (g_mode == SimMode::PBDHang) {
+		g_pbdHangIterationsOverride = static_cast<unsigned int>(iterations);
+	}
+	else if (g_mode == SimMode::PBDDrop) {
+		g_pbdDropIterationsOverride = static_cast<unsigned int>(iterations);
+	}
+	else if (g_mode == SimMode::PBDDropFloor) {
+		g_pbdFloorIterationsOverride = static_cast<unsigned int>(iterations);
+	}
+	else {
+		g_pbdDualIterationsOverride = static_cast<unsigned int>(iterations);
+	}
+	return true;
+}
+
+static bool parseFloorOption(int argc, char** argv, int& index) {
+	const std::string arg(argv[index]);
+	if (arg != "--dt") {
+		return false;
+	}
+	if (g_mode != SimMode::PBDDropFloor) {
+		throw std::runtime_error("--dt is only valid for the pbd drop-floor demo");
+	}
+	if (index + 1 >= argc) {
+		throw std::runtime_error("Missing value after --dt");
+	}
+
+	std::stringstream valueStream(argv[++index]);
+	float dt = 0.0f;
+	valueStream >> dt;
+	if (!valueStream || !valueStream.eof()
+		|| dt < PBDFloorCliParam::minTimestep
+		|| dt > PBDFloorCliParam::maxTimestep) {
+		throw std::runtime_error("--dt expects a float value in [0.001, 0.01]");
+	}
+
+	g_pbdFloorTimestepOverride = dt;
+	return true;
+}
+
+static bool parseDropOption(int argc, char** argv, int& index) {
+	const std::string arg(argv[index]);
+	if (arg != "--radius") {
+		return false;
+	}
+	if (g_mode != SimMode::PBDDrop) {
+		throw std::runtime_error("--radius is only valid for the pbd drop demo");
+	}
+	if (index + 1 >= argc) {
+		throw std::runtime_error("Missing value after --radius");
+	}
+
+	std::stringstream valueStream(argv[++index]);
+	float radius = 0.0f;
+	valueStream >> radius;
+	if (!valueStream || !valueStream.eof()
+		|| radius < PBDDropCliParam::minRadius
+		|| radius > PBDDropCliParam::maxRadius) {
+		throw std::runtime_error("--radius expects a float value in [0.1, 1.5]");
+	}
+
+	g_pbdDropStartupSphereRadius = radius;
+	return true;
 }
 
 static void parseOptionalArgs(int argc, char** argv, int startIndex) {
 	for (int i = startIndex; i < argc; ++i) {
-		const std::string arg(argv[i]);
-		if (arg == "--debug") {
-			g_enableDebugDiagnostics = true;
-			continue;
-		}
-
-		if (arg == "--self-thickness") {
-			if (i + 1 >= argc) {
-				throw std::runtime_error("Missing value after --self-thickness");
-			}
-
-			std::stringstream valueStream(argv[++i]);
-			float thickness = -1.0f;
-			valueStream >> thickness;
-			if (!valueStream || !valueStream.eof() || thickness <= 0.0f) {
-				throw std::runtime_error("--self-thickness expects a positive float value");
-			}
-
-			g_selfCollisionThicknessOverride = thickness;
-			continue;
-		}
-
-		if (arg == "--wind-speed") {
-			if (g_mode != SimMode::PBDHangWind) {
-				throw std::runtime_error("--wind-speed is only valid for the pbd hang-wind demo");
-			}
-			if (i + 1 >= argc) {
-				throw std::runtime_error("Missing value after --wind-speed");
-			}
-			if (g_windCliMode != WindCliMode::None) {
-				throw std::runtime_error("Specify --wind-speed only once");
-			}
-
-			std::stringstream valueStream(argv[++i]);
-			float windSpeed = 0.0f;
-			valueStream >> windSpeed;
-			if (!valueStream || !valueStream.eof()
-				|| windSpeed < PBDWindCliParam::minValue
-				|| windSpeed > PBDWindCliParam::maxValue) {
-				throw std::runtime_error("--wind-speed expects a float value in [0, 15]");
-			}
-
-			g_windCliMode = WindCliMode::Speed;
-			g_windSpeed = windSpeed;
-			continue;
-		}
-
-		if (arg == "--wind-dir") {
-			if (g_mode != SimMode::PBDHangWind) {
-				throw std::runtime_error("--wind-dir is only valid for the pbd hang-wind demo");
-			}
-			if (i + 3 >= argc) {
-				throw std::runtime_error("--wind-dir expects three float values: x y z");
-			}
-			if (g_windDirectionCliProvided) {
-				throw std::runtime_error("Specify --wind-dir only once");
-			}
-
-			std::stringstream xStream(argv[++i]);
-			std::stringstream yStream(argv[++i]);
-			std::stringstream zStream(argv[++i]);
-			float x = 0.0f;
-			float y = 0.0f;
-			float z = 0.0f;
-			xStream >> x;
-			yStream >> y;
-			zStream >> z;
-			if (!xStream || !xStream.eof() || !yStream || !yStream.eof() || !zStream || !zStream.eof()) {
-				throw std::runtime_error("--wind-dir expects three float values: x y z");
-			}
-
-			const Eigen::Vector3f direction(x, y, z);
-			if (direction.norm() < PBDWindCliParam::minDirectionNorm) {
-				throw std::runtime_error("--wind-dir expects a non-zero vector");
-			}
-
-			g_windDirection = direction;
-			g_windDirectionCliProvided = true;
-			continue;
-		}
-
-		if (arg == "--iters") {
-			if (g_mode != SimMode::PBDHang && g_mode != SimMode::PBDDrop && g_mode != SimMode::PBDDropFloor && g_mode != SimMode::PBDDropFloorDual) {
-				throw std::runtime_error("--iters is only valid for the pbd hang, pbd drop, pbd drop-floor, or pbd drop-floor-dual demo");
-			}
-			if (i + 1 >= argc) {
-				throw std::runtime_error("Missing value after --iters");
-			}
-			if ((g_mode == SimMode::PBDHang && g_pbdHangIterationsOverride != 0u)
-				|| (g_mode == SimMode::PBDDrop && g_pbdDropIterationsOverride != 0u)
-				|| (g_mode == SimMode::PBDDropFloor && g_pbdFloorIterationsOverride != 0u)
-				|| (g_mode == SimMode::PBDDropFloorDual && g_pbdDualIterationsOverride != 0u)) {
-				throw std::runtime_error("Specify --iters only once");
-			}
-
-			std::stringstream valueStream(argv[++i]);
-			int iterations = 0;
-			valueStream >> iterations;
-			// --iters controls the number of PBD projection passes per timestep,
-			// so keep it within a safe startup range for the interactive demos.
-			if (!valueStream || !valueStream.eof()
-				|| iterations < static_cast<int>(PBDHangCliParam::minIterations)
-				|| iterations > static_cast<int>(PBDHangCliParam::maxIterations)) {
-				throw std::runtime_error("--iters expects an integer value in [1, 80]");
-			}
-
-			if (g_mode == SimMode::PBDHang) {
-				g_pbdHangIterationsOverride = static_cast<unsigned int>(iterations);
-			}
-			else if (g_mode == SimMode::PBDDrop) {
-				g_pbdDropIterationsOverride = static_cast<unsigned int>(iterations);
-			}
-			else if (g_mode == SimMode::PBDDropFloor) {
-				g_pbdFloorIterationsOverride = static_cast<unsigned int>(iterations);
-			}
-			else {
-				g_pbdDualIterationsOverride = static_cast<unsigned int>(iterations);
-			}
-			continue;
-		}
-
-		if (arg == "--dt") {
-			if (g_mode != SimMode::PBDDropFloor) {
-				throw std::runtime_error("--dt is only valid for the pbd drop-floor demo");
-			}
-			if (i + 1 >= argc) {
-				throw std::runtime_error("Missing value after --dt");
-			}
-
-			std::stringstream valueStream(argv[++i]);
-			float dt = 0.0f;
-			valueStream >> dt;
-			if (!valueStream || !valueStream.eof()
-				|| dt < PBDFloorCliParam::minTimestep
-				|| dt > PBDFloorCliParam::maxTimestep) {
-				throw std::runtime_error("--dt expects a float value in [0.001, 0.01]");
-			}
-
-			g_pbdFloorTimestepOverride = dt;
-			continue;
-		}
-
-		if (arg == "--radius") {
-			if (g_mode != SimMode::PBDDrop) {
-				throw std::runtime_error("--radius is only valid for the pbd drop demo");
-			}
-			if (i + 1 >= argc) {
-				throw std::runtime_error("Missing value after --radius");
-			}
-
-			std::stringstream valueStream(argv[++i]);
-			float radius = 0.0f;
-			valueStream >> radius;
-			if (!valueStream || !valueStream.eof()
-				|| radius < PBDDropCliParam::minRadius
-				|| radius > PBDDropCliParam::maxRadius) {
-				throw std::runtime_error("--radius expects a float value in [0.1, 1.5]");
-			}
-
-			g_pbdDropStartupSphereRadius = radius;
-			continue;
-		}
-
-		throw std::runtime_error("Unknown argument: " + arg);
+		if (parseSharedOption(argc, argv, i)) continue;
+		if (parseWindOption(argc, argv, i)) continue;
+		if (parseIterationOption(argc, argv, i)) continue;
+		if (parseFloorOption(argc, argv, i)) continue;
+		if (parseDropOption(argc, argv, i)) continue;
+		throw std::runtime_error("Unknown argument: " + std::string(argv[i]));
 	}
 }
 
@@ -1314,10 +1398,7 @@ static void resetPBDHangDemo(bool resetParameters) {
 	if (UI != nullptr) {
 		UI->releasePoint();
 	}
-	g_mouseClickDown = false;
-	g_mouseLClickButton = false;
-	g_mouseRClickButton = false;
-	g_mouseMClickButton = false;
+	clearMouseButtonState();
 
 	std::copy(
 		g_pbdHangRuntime.initialPositions.begin(),
@@ -1469,10 +1550,7 @@ static void resetPBDWindDemo(bool resetParameters) {
 		return;
 	}
 
-	g_mouseClickDown = false;
-	g_mouseLClickButton = false;
-	g_mouseRClickButton = false;
-	g_mouseMClickButton = false;
+	clearMouseButtonState();
 
 	configurePBDWindSolver(g_pbdWindRuntime.currentWindSpeed, g_pbdWindRuntime.currentDirectionInput, false);
 	logPBDWindControlState("reset-cloth");
@@ -1608,10 +1686,7 @@ static void resetPBDDropDemo(bool resetParameters) {
 	const float bend = g_pbdSolver->getBendStiffness();
 	const float damping = g_pbdSolver->getDampingFactor();
 
-	g_mouseClickDown = false;
-	g_mouseLClickButton = false;
-	g_mouseRClickButton = false;
-	g_mouseMClickButton = false;
+	clearMouseButtonState();
 
 	configurePBDDropSolver(
 		stretch,
@@ -1828,10 +1903,7 @@ static void resetPBDFloorDemo(bool resetParameters) {
 		return;
 	}
 
-	g_mouseClickDown = false;
-	g_mouseLClickButton = false;
-	g_mouseRClickButton = false;
-	g_mouseMClickButton = false;
+	clearMouseButtonState();
 
 	configurePBDFloorSolver(
 		g_pbdSolver->getSelfCollisionStiffness(),
@@ -2047,10 +2119,7 @@ static void resetPBDDualDemo(bool resetParameters) {
 		return;
 	}
 
-	g_mouseClickDown = false;
-	g_mouseLClickButton = false;
-	g_mouseRClickButton = false;
-	g_mouseMClickButton = false;
+	clearMouseButtonState();
 
 	configurePBDDualSolver(
 		g_pbdSolver->getStructuralStiffness(),
@@ -2346,544 +2415,542 @@ static void reshape(int w, int h) {
 	glutPostRedisplay();
 }
 
-static void keyboard(unsigned char key, int, int) {
-	if (g_pbdSolver == nullptr) return;
+static void clearMouseButtonState() {
+	g_mouseClickDown = false;
+	g_mouseLClickButton = false;
+	g_mouseRClickButton = false;
+	g_mouseMClickButton = false;
+}
 
-	if (g_mode == SimMode::PBDHangWind) {
-		switch (key) {
-		case '1':
-			applyPBDWindSettings(
-				g_pbdWindRuntime.currentWindSpeed - PBDWindControlParam::speedStep,
-				g_pbdWindRuntime.currentDirectionInput
-			);
-			logPBDWindControlState("speed-");
-			break;
-		case '2':
-			applyPBDWindSettings(
-				g_pbdWindRuntime.currentWindSpeed + PBDWindControlParam::speedStep,
-				g_pbdWindRuntime.currentDirectionInput
-			);
-			logPBDWindControlState("speed+");
-			break;
-		case '3': {
-			Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
-			direction.x() = std::max(PBDWindControlParam::directionMin, direction.x() - PBDWindControlParam::directionStep);
-			if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
-				applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
-			}
-			logPBDWindControlState("dir-x-");
-			break;
-		}
-		case '4': {
-			Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
-			direction.x() = std::min(PBDWindControlParam::directionMax, direction.x() + PBDWindControlParam::directionStep);
-			if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
-				applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
-			}
-			logPBDWindControlState("dir-x+");
-			break;
-		}
-		case '5': {
-			Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
-			direction.y() = std::max(PBDWindControlParam::directionMin, direction.y() - PBDWindControlParam::directionStep);
-			if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
-				applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
-			}
-			logPBDWindControlState("dir-y-");
-			break;
-		}
-		case '6': {
-			Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
-			direction.y() = std::min(PBDWindControlParam::directionMax, direction.y() + PBDWindControlParam::directionStep);
-			if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
-				applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
-			}
-			logPBDWindControlState("dir-y+");
-			break;
-		}
-		case '7': {
-			Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
-			direction.z() = std::max(PBDWindControlParam::directionMin, direction.z() - PBDWindControlParam::directionStep);
-			if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
-				applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
-			}
-			logPBDWindControlState("dir-z-");
-			break;
-		}
-		case '8': {
-			Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
-			direction.z() = std::min(PBDWindControlParam::directionMax, direction.z() + PBDWindControlParam::directionStep);
-			if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
-				applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
-			}
-			logPBDWindControlState("dir-z+");
-			break;
-		}
-		case 'r':
-		case 'R':
-			resetPBDWindDemo(false);
-			break;
-		case 't':
-		case 'T':
-			resetPBDWindDemo(true);
-			break;
-		case 'p':
-		case 'P':
-			g_pbdWindRuntime.paused = !g_pbdWindRuntime.paused;
-			logPBDWindControlState(g_pbdWindRuntime.paused ? "pause" : "resume");
-			break;
-		default:
-			return;
-		}
-
-		glutPostRedisplay();
-		return;
-	}
-
-	if (g_mode == SimMode::PBDHang) {
-		switch (key) {
-		case '1':
-			// Stretch is a distance-constraint stiffness control.
-			g_pbdSolver->setStructuralStiffness(std::max(
-				PBDHangControlParam::stretchMin,
-				g_pbdSolver->getStructuralStiffness() - PBDHangControlParam::stretchStep
-			));
-			logPBDHangControlState("stretch-");
-			break;
-		case '2':
-			g_pbdSolver->setStructuralStiffness(std::min(
-				PBDHangControlParam::stretchMax,
-				g_pbdSolver->getStructuralStiffness() + PBDHangControlParam::stretchStep
-			));
-			logPBDHangControlState("stretch+");
-			break;
-		case '3':
-			// Shear is also a distance-constraint stiffness control.
-			g_pbdSolver->setShearStiffness(std::max(
-				PBDHangControlParam::shearMin,
-				g_pbdSolver->getShearStiffness() - PBDHangControlParam::shearStep
-			));
-			logPBDHangControlState("shear-");
-			break;
-		case '4':
-			g_pbdSolver->setShearStiffness(std::min(
-				PBDHangControlParam::shearMax,
-				g_pbdSolver->getShearStiffness() + PBDHangControlParam::shearStep
-			));
-			logPBDHangControlState("shear+");
-			break;
-		case '5':
-			// Bend controls dihedral bending stiffness.
-			g_pbdSolver->setBendStiffness(std::max(
-				PBDHangControlParam::bendMin,
-				g_pbdSolver->getBendStiffness() - PBDHangControlParam::bendStep
-			));
-			logPBDHangControlState("bend-");
-			break;
-		case '6':
-			g_pbdSolver->setBendStiffness(std::min(
-				PBDHangControlParam::bendMax,
-				g_pbdSolver->getBendStiffness() + PBDHangControlParam::bendStep
-			));
-			logPBDHangControlState("bend+");
-			break;
-		case '7':
-			// Damping controls velocity energy decay and keeps gravity unchanged.
-			g_pbdSolver->setDampingFactor(std::max(
-				PBDHangControlParam::dampingMin,
-				g_pbdSolver->getDampingFactor() - PBDHangControlParam::dampingStep
-			));
-			logPBDHangControlState("damping-");
-			break;
-		case '8':
-			g_pbdSolver->setDampingFactor(std::min(
-				PBDHangControlParam::dampingMax,
-				g_pbdSolver->getDampingFactor() + PBDHangControlParam::dampingStep
-			));
-			logPBDHangControlState("damping+");
-			break;
-		case 'r':
-		case 'R':
-			resetPBDHangDemo(false);
-			break;
-		case 't':
-		case 'T':
-			resetPBDHangDemo(true);
-			break;
-		case 'p':
-		case 'P':
-			g_pbdHangRuntime.paused = !g_pbdHangRuntime.paused;
-			logPBDHangControlState(g_pbdHangRuntime.paused ? "pause" : "resume");
-			break;
-		default:
-			return;
-		}
-
-		glutPostRedisplay();
-		return;
-	}
-
-	if (g_mode != SimMode::PBDDrop) {
-		if (g_mode == SimMode::PBDDropFloor) {
-			switch (key) {
-			case '1':
-				// Self-collision stiffness controls how strongly self-collision
-				// inequality constraints are projected.
-				g_pbdSolver->setSelfCollisionStiffness(std::max(
-					PBDFloorControlParam::selfCollisionStiffnessMin,
-					g_pbdSolver->getSelfCollisionStiffness() - PBDFloorControlParam::selfCollisionStiffnessStep
-				));
-				logPBDFloorControlState("self-k-");
-				break;
-			case '2':
-				g_pbdSolver->setSelfCollisionStiffness(std::min(
-					PBDFloorControlParam::selfCollisionStiffnessMax,
-					g_pbdSolver->getSelfCollisionStiffness() + PBDFloorControlParam::selfCollisionStiffnessStep
-				));
-				logPBDFloorControlState("self-k+");
-				break;
-			case '3':
-				g_pbdSolver->setMaxSelfCollisionContactsPerVertex(std::max(
-					PBDFloorControlParam::minSelfCollisionContacts,
-					g_pbdSolver->getMaxSelfCollisionContactsPerVertex() - 1u
-				));
-				logPBDFloorControlState("max-contacts-");
-				break;
-			case '4':
-				g_pbdSolver->setMaxSelfCollisionContactsPerVertex(std::min(
-					PBDFloorControlParam::maxSelfCollisionContacts,
-					g_pbdSolver->getMaxSelfCollisionContactsPerVertex() + 1u
-				));
-				logPBDFloorControlState("max-contacts+");
-				break;
-			case '5':
-				g_pbdSolver->setSelfCollisionThickness(std::max(
-					PBDFloorControlParam::selfCollisionThicknessMin,
-					g_pbdSolver->getSelfCollisionThickness() - PBDFloorControlParam::selfCollisionThicknessStep
-				));
-				logPBDFloorControlState("self-thickness-");
-				break;
-			case '6':
-				g_pbdSolver->setSelfCollisionThickness(std::min(
-					PBDFloorControlParam::selfCollisionThicknessMax,
-					g_pbdSolver->getSelfCollisionThickness() + PBDFloorControlParam::selfCollisionThicknessStep
-				));
-				logPBDFloorControlState("self-thickness+");
-				break;
-			case '7':
-				// Floor friction is velocity-level tangential damping after contact.
-				g_pbdSolver->setPlaneFriction(std::max(
-					PBDFloorControlParam::floorFrictionMin,
-					g_pbdSolver->getPlaneFriction() - PBDFloorControlParam::floorFrictionStep
-				));
-				logPBDFloorControlState("floor-friction-");
-				break;
-			case '8':
-				g_pbdSolver->setPlaneFriction(std::min(
-					PBDFloorControlParam::floorFrictionMax,
-					g_pbdSolver->getPlaneFriction() + PBDFloorControlParam::floorFrictionStep
-				));
-				logPBDFloorControlState("floor-friction+");
-				break;
-			case 'q':
-			case 'Q':
-				g_pbdSolver->setBendStiffness(std::max(
-					PBDFloorControlParam::bendMin,
-					g_pbdSolver->getBendStiffness() - PBDFloorControlParam::bendStep
-				));
-				logPBDFloorControlState("bend-");
-				break;
-			case 'w':
-			case 'W':
-				g_pbdSolver->setBendStiffness(std::min(
-					PBDFloorControlParam::bendMax,
-					g_pbdSolver->getBendStiffness() + PBDFloorControlParam::bendStep
-				));
-				logPBDFloorControlState("bend+");
-				break;
-			case 'a':
-			case 'A':
-				g_pbdSolver->setDampingFactor(std::max(
-					PBDFloorControlParam::dampingMin,
-					g_pbdSolver->getDampingFactor() - PBDFloorControlParam::dampingStep
-				));
-				logPBDFloorControlState("damping-");
-				break;
-			case 's':
-			case 'S':
-				g_pbdSolver->setDampingFactor(std::min(
-					PBDFloorControlParam::dampingMax,
-					g_pbdSolver->getDampingFactor() + PBDFloorControlParam::dampingStep
-				));
-				logPBDFloorControlState("damping+");
-				break;
-			case '[':
-				g_pbdFloorRuntime.pendingMeshResolution = previousPBDFloorResolution(g_pbdFloorRuntime.pendingMeshResolution);
-				logPBDFloorControlState("pending-mesh-");
-				break;
-			case ']':
-				g_pbdFloorRuntime.pendingMeshResolution = nextPBDFloorResolution(g_pbdFloorRuntime.pendingMeshResolution);
-				logPBDFloorControlState("pending-mesh+");
-				break;
-			case '9': {
-				const int nextIndex = std::max(0, g_pbdFloorRuntime.speedPresetIndex - 1);
-				setPBDFloorRuntimeTimestep(PBDFloorControlParam::speedPresets[nextIndex], nextIndex, false);
-				logPBDFloorControlState("speed-");
-				break;
-			}
-			case '0': {
-				const int nextIndex = std::min(
-					static_cast<int>(PBDFloorControlParam::speedPresets.size()) - 1,
-					g_pbdFloorRuntime.speedPresetIndex + 1
-				);
-				setPBDFloorRuntimeTimestep(PBDFloorControlParam::speedPresets[nextIndex], nextIndex, false);
-				logPBDFloorControlState("speed+");
-				break;
-			}
-			case 'r':
-			case 'R':
-				resetPBDFloorDemo(false);
-				break;
-			case 't':
-			case 'T':
-				resetPBDFloorDemo(true);
-				break;
-			case 'p':
-			case 'P':
-				g_pbdFloorRuntime.paused = !g_pbdFloorRuntime.paused;
-				logPBDFloorControlState(g_pbdFloorRuntime.paused ? "pause" : "resume");
-				break;
-			case 'd':
-			case 'D':
-				g_enableDebugDiagnostics = !g_enableDebugDiagnostics;
-				g_pbdFloorRuntime.debugEnabled = g_enableDebugDiagnostics;
-				logPBDFloorControlState(g_enableDebugDiagnostics ? "debug-on" : "debug-off");
-				break;
-			default:
-				return;
-			}
-
-			glutPostRedisplay();
-			return;
-		}
-
-		if (g_mode != SimMode::PBDDropFloorDual) {
-			return;
-		}
-
-		switch (key) {
-		case '1':
-			// Stretch is a distance-constraint stiffness control.
-			g_pbdSolver->setStructuralStiffness(std::max(
-				PBDDualControlParam::stretchMin,
-				g_pbdSolver->getStructuralStiffness() - PBDDualControlParam::stretchStep
-			));
-			logPBDDualControlState("stretch-");
-			break;
-		case '2':
-			g_pbdSolver->setStructuralStiffness(std::min(
-				PBDDualControlParam::stretchMax,
-				g_pbdSolver->getStructuralStiffness() + PBDDualControlParam::stretchStep
-			));
-			logPBDDualControlState("stretch+");
-			break;
-		case '3':
-			// Shear is also a distance-constraint stiffness control.
-			g_pbdSolver->setShearStiffness(std::max(
-				PBDDualControlParam::shearMin,
-				g_pbdSolver->getShearStiffness() - PBDDualControlParam::shearStep
-			));
-			logPBDDualControlState("shear-");
-			break;
-		case '4':
-			g_pbdSolver->setShearStiffness(std::min(
-				PBDDualControlParam::shearMax,
-				g_pbdSolver->getShearStiffness() + PBDDualControlParam::shearStep
-			));
-			logPBDDualControlState("shear+");
-			break;
-		case '5':
-			// Bend controls dihedral bending stiffness.
-			g_pbdSolver->setBendStiffness(std::max(
-				PBDDualControlParam::bendMin,
-				g_pbdSolver->getBendStiffness() - PBDDualControlParam::bendStep
-			));
-			logPBDDualControlState("bend-");
-			break;
-		case '6':
-			g_pbdSolver->setBendStiffness(std::min(
-				PBDDualControlParam::bendMax,
-				g_pbdSolver->getBendStiffness() + PBDDualControlParam::bendStep
-			));
-			logPBDDualControlState("bend+");
-			break;
-		case '[':
-			// Mesh resolution changes particle, constraint, and contact count and
-			// is applied only on reset when the cloth system is rebuilt.
-			g_pbdDualRuntime.pendingMeshResolution = previousPBDDualResolution(g_pbdDualRuntime.pendingMeshResolution);
-			logPBDDualControlState("pending-mesh-");
-			break;
-		case ']':
-			g_pbdDualRuntime.pendingMeshResolution = nextPBDDualResolution(g_pbdDualRuntime.pendingMeshResolution);
-			logPBDDualControlState("pending-mesh+");
-			break;
-		case 'q':
-		case 'Q':
-			// Sphere radius changes the smooth obstacle collision size.
-			g_pbdDualRuntime.pendingSphereRadius = std::max(
-				PBDDualControlParam::sphereRadiusMin,
-				g_pbdDualRuntime.pendingSphereRadius - PBDDualControlParam::objectSizeStep
-			);
-			logPBDDualControlState("pending-sphere-");
-			break;
-		case 'w':
-		case 'W':
-			g_pbdDualRuntime.pendingSphereRadius = std::min(
-				PBDDualControlParam::sphereRadiusMax,
-				g_pbdDualRuntime.pendingSphereRadius + PBDDualControlParam::objectSizeStep
-			);
-			logPBDDualControlState("pending-sphere+");
-			break;
-		case 'a':
-		case 'A':
-			// Cube size changes the sharp analytic box collider and visual cube together.
-			g_pbdDualRuntime.pendingCubeSize = std::max(
-				PBDDualControlParam::cubeSizeMin,
-				g_pbdDualRuntime.pendingCubeSize - PBDDualControlParam::objectSizeStep
-			);
-			logPBDDualControlState("pending-cube-");
-			break;
-		case 's':
-		case 'S':
-			g_pbdDualRuntime.pendingCubeSize = std::min(
-				PBDDualControlParam::cubeSizeMax,
-				g_pbdDualRuntime.pendingCubeSize + PBDDualControlParam::objectSizeStep
-			);
-			logPBDDualControlState("pending-cube+");
-			break;
-		case '9': {
-			const int nextIndex = std::max(0, g_pbdDualRuntime.speedPresetIndex - 1);
-			setPBDDualRuntimeTimestep(PBDFloorControlParam::speedPresets[nextIndex], nextIndex, false);
-			logPBDDualControlState("speed-");
-			break;
-		}
-		case '0': {
-			const int nextIndex = std::min(
-				static_cast<int>(PBDFloorControlParam::speedPresets.size()) - 1,
-				g_pbdDualRuntime.speedPresetIndex + 1
-			);
-			setPBDDualRuntimeTimestep(PBDFloorControlParam::speedPresets[nextIndex], nextIndex, false);
-			logPBDDualControlState("speed+");
-			break;
-		}
-		case 'r':
-		case 'R':
-			resetPBDDualDemo(false);
-			break;
-		case 't':
-		case 'T':
-			resetPBDDualDemo(true);
-			break;
-		case 'p':
-		case 'P':
-			g_pbdDualRuntime.paused = !g_pbdDualRuntime.paused;
-			logPBDDualControlState(g_pbdDualRuntime.paused ? "pause" : "resume");
-			break;
-		default:
-			return;
-		}
-
-		glutPostRedisplay();
-		return;
-	}
-
+static bool handlePBDWindKey(unsigned char key) {
 	switch (key) {
 	case '1':
-		// Stretch is a distance-constraint stiffness control.
+		applyPBDWindSettings(
+			g_pbdWindRuntime.currentWindSpeed - PBDWindControlParam::speedStep,
+			g_pbdWindRuntime.currentDirectionInput
+		);
+		logPBDWindControlState("speed-");
+		return true;
+	case '2':
+		applyPBDWindSettings(
+			g_pbdWindRuntime.currentWindSpeed + PBDWindControlParam::speedStep,
+			g_pbdWindRuntime.currentDirectionInput
+		);
+		logPBDWindControlState("speed+");
+		return true;
+	case '3': {
+		Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
+		direction.x() = std::max(PBDWindControlParam::directionMin, direction.x() - PBDWindControlParam::directionStep);
+		if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
+			applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
+		}
+		logPBDWindControlState("dir-x-");
+		return true;
+	}
+	case '4': {
+		Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
+		direction.x() = std::min(PBDWindControlParam::directionMax, direction.x() + PBDWindControlParam::directionStep);
+		if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
+			applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
+		}
+		logPBDWindControlState("dir-x+");
+		return true;
+	}
+	case '5': {
+		Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
+		direction.y() = std::max(PBDWindControlParam::directionMin, direction.y() - PBDWindControlParam::directionStep);
+		if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
+			applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
+		}
+		logPBDWindControlState("dir-y-");
+		return true;
+	}
+	case '6': {
+		Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
+		direction.y() = std::min(PBDWindControlParam::directionMax, direction.y() + PBDWindControlParam::directionStep);
+		if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
+			applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
+		}
+		logPBDWindControlState("dir-y+");
+		return true;
+	}
+	case '7': {
+		Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
+		direction.z() = std::max(PBDWindControlParam::directionMin, direction.z() - PBDWindControlParam::directionStep);
+		if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
+			applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
+		}
+		logPBDWindControlState("dir-z-");
+		return true;
+	}
+	case '8': {
+		Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
+		direction.z() = std::min(PBDWindControlParam::directionMax, direction.z() + PBDWindControlParam::directionStep);
+		if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
+			applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
+		}
+		logPBDWindControlState("dir-z+");
+		return true;
+	}
+	case 'r':
+	case 'R':
+		resetPBDWindDemo(false);
+		return true;
+	case 't':
+	case 'T':
+		resetPBDWindDemo(true);
+		return true;
+	case 'p':
+	case 'P':
+		g_pbdWindRuntime.paused = !g_pbdWindRuntime.paused;
+		logPBDWindControlState(g_pbdWindRuntime.paused ? "pause" : "resume");
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool handlePBDHangKey(unsigned char key) {
+	switch (key) {
+	case '1':
+		g_pbdSolver->setStructuralStiffness(std::max(
+			PBDHangControlParam::stretchMin,
+			g_pbdSolver->getStructuralStiffness() - PBDHangControlParam::stretchStep
+		));
+		logPBDHangControlState("stretch-");
+		return true;
+	case '2':
+		g_pbdSolver->setStructuralStiffness(std::min(
+			PBDHangControlParam::stretchMax,
+			g_pbdSolver->getStructuralStiffness() + PBDHangControlParam::stretchStep
+		));
+		logPBDHangControlState("stretch+");
+		return true;
+	case '3':
+		g_pbdSolver->setShearStiffness(std::max(
+			PBDHangControlParam::shearMin,
+			g_pbdSolver->getShearStiffness() - PBDHangControlParam::shearStep
+		));
+		logPBDHangControlState("shear-");
+		return true;
+	case '4':
+		g_pbdSolver->setShearStiffness(std::min(
+			PBDHangControlParam::shearMax,
+			g_pbdSolver->getShearStiffness() + PBDHangControlParam::shearStep
+		));
+		logPBDHangControlState("shear+");
+		return true;
+	case '5':
+		g_pbdSolver->setBendStiffness(std::max(
+			PBDHangControlParam::bendMin,
+			g_pbdSolver->getBendStiffness() - PBDHangControlParam::bendStep
+		));
+		logPBDHangControlState("bend-");
+		return true;
+	case '6':
+		g_pbdSolver->setBendStiffness(std::min(
+			PBDHangControlParam::bendMax,
+			g_pbdSolver->getBendStiffness() + PBDHangControlParam::bendStep
+		));
+		logPBDHangControlState("bend+");
+		return true;
+	case '7':
+		g_pbdSolver->setDampingFactor(std::max(
+			PBDHangControlParam::dampingMin,
+			g_pbdSolver->getDampingFactor() - PBDHangControlParam::dampingStep
+		));
+		logPBDHangControlState("damping-");
+		return true;
+	case '8':
+		g_pbdSolver->setDampingFactor(std::min(
+			PBDHangControlParam::dampingMax,
+			g_pbdSolver->getDampingFactor() + PBDHangControlParam::dampingStep
+		));
+		logPBDHangControlState("damping+");
+		return true;
+	case 'r':
+	case 'R':
+		resetPBDHangDemo(false);
+		return true;
+	case 't':
+	case 'T':
+		resetPBDHangDemo(true);
+		return true;
+	case 'p':
+	case 'P':
+		g_pbdHangRuntime.paused = !g_pbdHangRuntime.paused;
+		logPBDHangControlState(g_pbdHangRuntime.paused ? "pause" : "resume");
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool handlePBDDropKey(unsigned char key) {
+	switch (key) {
+	case '1':
 		g_pbdSolver->setStructuralStiffness(std::max(
 			PBDDropControlParam::stretchMin,
 			g_pbdSolver->getStructuralStiffness() - PBDDropControlParam::stretchStep
 		));
 		logPBDDropControlState("stretch-");
-		break;
+		return true;
 	case '2':
 		g_pbdSolver->setStructuralStiffness(std::min(
 			PBDDropControlParam::stretchMax,
 			g_pbdSolver->getStructuralStiffness() + PBDDropControlParam::stretchStep
 		));
 		logPBDDropControlState("stretch+");
-		break;
+		return true;
 	case '3':
-		// Shear is also a distance-constraint stiffness control.
 		g_pbdSolver->setShearStiffness(std::max(
 			PBDDropControlParam::shearMin,
 			g_pbdSolver->getShearStiffness() - PBDDropControlParam::shearStep
 		));
 		logPBDDropControlState("shear-");
-		break;
+		return true;
 	case '4':
 		g_pbdSolver->setShearStiffness(std::min(
 			PBDDropControlParam::shearMax,
 			g_pbdSolver->getShearStiffness() + PBDDropControlParam::shearStep
 		));
 		logPBDDropControlState("shear+");
-		break;
+		return true;
 	case '5':
-		// Bend controls dihedral bending stiffness.
 		g_pbdSolver->setBendStiffness(std::max(
 			PBDDropControlParam::bendMin,
 			g_pbdSolver->getBendStiffness() - PBDDropControlParam::bendStep
 		));
 		logPBDDropControlState("bend-");
-		break;
+		return true;
 	case '6':
 		g_pbdSolver->setBendStiffness(std::min(
 			PBDDropControlParam::bendMax,
 			g_pbdSolver->getBendStiffness() + PBDDropControlParam::bendStep
 		));
 		logPBDDropControlState("bend+");
-		break;
+		return true;
 	case '7':
-		// Damping controls velocity energy decay and keeps gravity unchanged.
 		g_pbdSolver->setDampingFactor(std::max(
 			PBDDropControlParam::dampingMin,
 			g_pbdSolver->getDampingFactor() - PBDDropControlParam::dampingStep
 		));
 		logPBDDropControlState("damping-");
-		break;
+		return true;
 	case '8':
 		g_pbdSolver->setDampingFactor(std::min(
 			PBDDropControlParam::dampingMax,
 			g_pbdSolver->getDampingFactor() + PBDDropControlParam::dampingStep
 		));
 		logPBDDropControlState("damping+");
-		break;
+		return true;
 	case '[':
 		g_pbdDropRuntime.pendingMeshResolution = previousPBDDropResolution(g_pbdDropRuntime.pendingMeshResolution);
 		logPBDDropControlState("pending-mesh-");
-		break;
+		return true;
 	case ']':
 		g_pbdDropRuntime.pendingMeshResolution = nextPBDDropResolution(g_pbdDropRuntime.pendingMeshResolution);
 		logPBDDropControlState("pending-mesh+");
-		break;
+		return true;
 	case 'r':
 	case 'R':
 		resetPBDDropDemo(false);
-		break;
+		return true;
 	case 't':
 	case 'T':
 		resetPBDDropDemo(true);
-		break;
+		return true;
 	case 'p':
 	case 'P':
 		g_pbdDropRuntime.paused = !g_pbdDropRuntime.paused;
 		logPBDDropControlState(g_pbdDropRuntime.paused ? "pause" : "resume");
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool handlePBDFloorKey(unsigned char key) {
+	switch (key) {
+	case '1':
+		g_pbdSolver->setSelfCollisionStiffness(std::max(
+			PBDFloorControlParam::selfCollisionStiffnessMin,
+			g_pbdSolver->getSelfCollisionStiffness() - PBDFloorControlParam::selfCollisionStiffnessStep
+		));
+		logPBDFloorControlState("self-k-");
+		return true;
+	case '2':
+		g_pbdSolver->setSelfCollisionStiffness(std::min(
+			PBDFloorControlParam::selfCollisionStiffnessMax,
+			g_pbdSolver->getSelfCollisionStiffness() + PBDFloorControlParam::selfCollisionStiffnessStep
+		));
+		logPBDFloorControlState("self-k+");
+		return true;
+	case '3':
+		g_pbdSolver->setMaxSelfCollisionContactsPerVertex(std::max(
+			PBDFloorControlParam::minSelfCollisionContacts,
+			g_pbdSolver->getMaxSelfCollisionContactsPerVertex() - 1u
+		));
+		logPBDFloorControlState("max-contacts-");
+		return true;
+	case '4':
+		g_pbdSolver->setMaxSelfCollisionContactsPerVertex(std::min(
+			PBDFloorControlParam::maxSelfCollisionContacts,
+			g_pbdSolver->getMaxSelfCollisionContactsPerVertex() + 1u
+		));
+		logPBDFloorControlState("max-contacts+");
+		return true;
+	case '5':
+		g_pbdSolver->setSelfCollisionThickness(std::max(
+			PBDFloorControlParam::selfCollisionThicknessMin,
+			g_pbdSolver->getSelfCollisionThickness() - PBDFloorControlParam::selfCollisionThicknessStep
+		));
+		logPBDFloorControlState("self-thickness-");
+		return true;
+	case '6':
+		g_pbdSolver->setSelfCollisionThickness(std::min(
+			PBDFloorControlParam::selfCollisionThicknessMax,
+			g_pbdSolver->getSelfCollisionThickness() + PBDFloorControlParam::selfCollisionThicknessStep
+		));
+		logPBDFloorControlState("self-thickness+");
+		return true;
+	case '7':
+		g_pbdSolver->setPlaneFriction(std::max(
+			PBDFloorControlParam::floorFrictionMin,
+			g_pbdSolver->getPlaneFriction() - PBDFloorControlParam::floorFrictionStep
+		));
+		logPBDFloorControlState("floor-friction-");
+		return true;
+	case '8':
+		g_pbdSolver->setPlaneFriction(std::min(
+			PBDFloorControlParam::floorFrictionMax,
+			g_pbdSolver->getPlaneFriction() + PBDFloorControlParam::floorFrictionStep
+		));
+		logPBDFloorControlState("floor-friction+");
+		return true;
+	case 'q':
+	case 'Q':
+		g_pbdSolver->setBendStiffness(std::max(
+			PBDFloorControlParam::bendMin,
+			g_pbdSolver->getBendStiffness() - PBDFloorControlParam::bendStep
+		));
+		logPBDFloorControlState("bend-");
+		return true;
+	case 'w':
+	case 'W':
+		g_pbdSolver->setBendStiffness(std::min(
+			PBDFloorControlParam::bendMax,
+			g_pbdSolver->getBendStiffness() + PBDFloorControlParam::bendStep
+		));
+		logPBDFloorControlState("bend+");
+		return true;
+	case 'a':
+	case 'A':
+		g_pbdSolver->setDampingFactor(std::max(
+			PBDFloorControlParam::dampingMin,
+			g_pbdSolver->getDampingFactor() - PBDFloorControlParam::dampingStep
+		));
+		logPBDFloorControlState("damping-");
+		return true;
+	case 's':
+	case 'S':
+		g_pbdSolver->setDampingFactor(std::min(
+			PBDFloorControlParam::dampingMax,
+			g_pbdSolver->getDampingFactor() + PBDFloorControlParam::dampingStep
+		));
+		logPBDFloorControlState("damping+");
+		return true;
+	case '[':
+		g_pbdFloorRuntime.pendingMeshResolution = previousPBDFloorResolution(g_pbdFloorRuntime.pendingMeshResolution);
+		logPBDFloorControlState("pending-mesh-");
+		return true;
+	case ']':
+		g_pbdFloorRuntime.pendingMeshResolution = nextPBDFloorResolution(g_pbdFloorRuntime.pendingMeshResolution);
+		logPBDFloorControlState("pending-mesh+");
+		return true;
+	case '9': {
+		const int nextIndex = std::max(0, g_pbdFloorRuntime.speedPresetIndex - 1);
+		setPBDFloorRuntimeTimestep(PBDFloorControlParam::speedPresets[nextIndex], nextIndex, false);
+		logPBDFloorControlState("speed-");
+		return true;
+	}
+	case '0': {
+		const int nextIndex = std::min(
+			static_cast<int>(PBDFloorControlParam::speedPresets.size()) - 1,
+			g_pbdFloorRuntime.speedPresetIndex + 1
+		);
+		setPBDFloorRuntimeTimestep(PBDFloorControlParam::speedPresets[nextIndex], nextIndex, false);
+		logPBDFloorControlState("speed+");
+		return true;
+	}
+	case 'r':
+	case 'R':
+		resetPBDFloorDemo(false);
+		return true;
+	case 't':
+	case 'T':
+		resetPBDFloorDemo(true);
+		return true;
+	case 'p':
+	case 'P':
+		g_pbdFloorRuntime.paused = !g_pbdFloorRuntime.paused;
+		logPBDFloorControlState(g_pbdFloorRuntime.paused ? "pause" : "resume");
+		return true;
+	case 'd':
+	case 'D':
+		g_enableDebugDiagnostics = !g_enableDebugDiagnostics;
+		g_pbdFloorRuntime.debugEnabled = g_enableDebugDiagnostics;
+		logPBDFloorControlState(g_enableDebugDiagnostics ? "debug-on" : "debug-off");
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool handlePBDDualKey(unsigned char key) {
+	switch (key) {
+	case '1':
+		g_pbdSolver->setStructuralStiffness(std::max(
+			PBDDualControlParam::stretchMin,
+			g_pbdSolver->getStructuralStiffness() - PBDDualControlParam::stretchStep
+		));
+		logPBDDualControlState("stretch-");
+		return true;
+	case '2':
+		g_pbdSolver->setStructuralStiffness(std::min(
+			PBDDualControlParam::stretchMax,
+			g_pbdSolver->getStructuralStiffness() + PBDDualControlParam::stretchStep
+		));
+		logPBDDualControlState("stretch+");
+		return true;
+	case '3':
+		g_pbdSolver->setShearStiffness(std::max(
+			PBDDualControlParam::shearMin,
+			g_pbdSolver->getShearStiffness() - PBDDualControlParam::shearStep
+		));
+		logPBDDualControlState("shear-");
+		return true;
+	case '4':
+		g_pbdSolver->setShearStiffness(std::min(
+			PBDDualControlParam::shearMax,
+			g_pbdSolver->getShearStiffness() + PBDDualControlParam::shearStep
+		));
+		logPBDDualControlState("shear+");
+		return true;
+	case '5':
+		g_pbdSolver->setBendStiffness(std::max(
+			PBDDualControlParam::bendMin,
+			g_pbdSolver->getBendStiffness() - PBDDualControlParam::bendStep
+		));
+		logPBDDualControlState("bend-");
+		return true;
+	case '6':
+		g_pbdSolver->setBendStiffness(std::min(
+			PBDDualControlParam::bendMax,
+			g_pbdSolver->getBendStiffness() + PBDDualControlParam::bendStep
+		));
+		logPBDDualControlState("bend+");
+		return true;
+	case '[':
+		g_pbdDualRuntime.pendingMeshResolution = previousPBDDualResolution(g_pbdDualRuntime.pendingMeshResolution);
+		logPBDDualControlState("pending-mesh-");
+		return true;
+	case ']':
+		g_pbdDualRuntime.pendingMeshResolution = nextPBDDualResolution(g_pbdDualRuntime.pendingMeshResolution);
+		logPBDDualControlState("pending-mesh+");
+		return true;
+	case 'q':
+	case 'Q':
+		g_pbdDualRuntime.pendingSphereRadius = std::max(
+			PBDDualControlParam::sphereRadiusMin,
+			g_pbdDualRuntime.pendingSphereRadius - PBDDualControlParam::objectSizeStep
+		);
+		logPBDDualControlState("pending-sphere-");
+		return true;
+	case 'w':
+	case 'W':
+		g_pbdDualRuntime.pendingSphereRadius = std::min(
+			PBDDualControlParam::sphereRadiusMax,
+			g_pbdDualRuntime.pendingSphereRadius + PBDDualControlParam::objectSizeStep
+		);
+		logPBDDualControlState("pending-sphere+");
+		return true;
+	case 'a':
+	case 'A':
+		g_pbdDualRuntime.pendingCubeSize = std::max(
+			PBDDualControlParam::cubeSizeMin,
+			g_pbdDualRuntime.pendingCubeSize - PBDDualControlParam::objectSizeStep
+		);
+		logPBDDualControlState("pending-cube-");
+		return true;
+	case 's':
+	case 'S':
+		g_pbdDualRuntime.pendingCubeSize = std::min(
+			PBDDualControlParam::cubeSizeMax,
+			g_pbdDualRuntime.pendingCubeSize + PBDDualControlParam::objectSizeStep
+		);
+		logPBDDualControlState("pending-cube+");
+		return true;
+	case '9': {
+		const int nextIndex = std::max(0, g_pbdDualRuntime.speedPresetIndex - 1);
+		setPBDDualRuntimeTimestep(PBDFloorControlParam::speedPresets[nextIndex], nextIndex, false);
+		logPBDDualControlState("speed-");
+		return true;
+	}
+	case '0': {
+		const int nextIndex = std::min(
+			static_cast<int>(PBDFloorControlParam::speedPresets.size()) - 1,
+			g_pbdDualRuntime.speedPresetIndex + 1
+		);
+		setPBDDualRuntimeTimestep(PBDFloorControlParam::speedPresets[nextIndex], nextIndex, false);
+		logPBDDualControlState("speed+");
+		return true;
+	}
+	case 'r':
+	case 'R':
+		resetPBDDualDemo(false);
+		return true;
+	case 't':
+	case 'T':
+		resetPBDDualDemo(true);
+		return true;
+	case 'p':
+	case 'P':
+		g_pbdDualRuntime.paused = !g_pbdDualRuntime.paused;
+		logPBDDualControlState(g_pbdDualRuntime.paused ? "pause" : "resume");
+		return true;
+	default:
+		return false;
+	}
+}
+
+static void keyboard(unsigned char key, int, int) {
+	if (g_pbdSolver == nullptr) return;
+
+	bool handled = false;
+	switch (g_mode) {
+	case SimMode::PBDHangWind:
+		handled = handlePBDWindKey(key);
+		break;
+	case SimMode::PBDHang:
+		handled = handlePBDHangKey(key);
+		break;
+	case SimMode::PBDDrop:
+		handled = handlePBDDropKey(key);
+		break;
+	case SimMode::PBDDropFloor:
+		handled = handlePBDFloorKey(key);
+		break;
+	case SimMode::PBDDropFloorDual:
+		handled = handlePBDDualKey(key);
 		break;
 	default:
 		return;
 	}
 
-	glutPostRedisplay();
+	if (handled) {
+		glutPostRedisplay();
+	}
 }
 
 static void mouse(const int button, const int state, const int x, const int y) {

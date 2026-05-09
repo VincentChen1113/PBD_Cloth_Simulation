@@ -96,6 +96,8 @@ static WindCliMode g_windCliMode = WindCliMode::None;
 static float g_windSpeed = 0.0f;
 static unsigned int g_pbdHangIterationsOverride = 0u;
 static unsigned int g_pbdDropIterationsOverride = 0u;
+static unsigned int g_pbdFloorIterationsOverride = 0u;
+static float g_pbdFloorTimestepOverride = -1.0f;
 
 // Constraint Graph
 static CgRootNode* g_cgRootNode;
@@ -199,6 +201,37 @@ namespace PBDDropControlParam {
 	static const unsigned int defaultMeshResolution = 33u;
 }
 
+namespace PBDFloorCliParam {
+	static const unsigned int minIterations = 1u;
+	static const unsigned int maxIterations = 80u;
+	static const float minTimestep = 0.001f;
+	static const float maxTimestep = 0.01f;
+}
+
+namespace PBDFloorControlParam {
+	static const float selfCollisionStiffnessMin = 0.0f;
+	static const float selfCollisionStiffnessMax = 1.0f;
+	static const float selfCollisionStiffnessStep = 0.05f;
+	static const unsigned int minSelfCollisionContacts = 1u;
+	static const unsigned int maxSelfCollisionContacts = 12u;
+	static const float selfCollisionThicknessMin = 0.001f;
+	static const float selfCollisionThicknessMax = 0.03f;
+	static const float selfCollisionThicknessStep = 0.001f;
+	static const float floorFrictionMin = 0.0f;
+	static const float floorFrictionMax = 0.8f;
+	static const float floorFrictionStep = 0.05f;
+	static const float bendMin = 0.0f;
+	static const float bendMax = 0.05f;
+	static const float bendStep = 0.0025f;
+	static const float dampingMin = 0.0f;
+	static const float dampingMax = 0.20f;
+	static const float dampingStep = 0.01f;
+	static const std::array<unsigned int, 6> meshChoices = { 17u, 25u, 33u, 41u, 55u, 65u };
+	static const unsigned int defaultMeshResolution = 33u;
+	static const std::array<float, 3> speedPresets = { 0.003f, 0.0045f, 0.006f };
+	static const std::array<const char*, 3> speedPresetLabels = { "Stable", "Balanced", "Fast" };
+};
+
 namespace PBDWindCliParam {
 	static const float minValue = 0.0f; // Safe lower bound for user-provided --wind-speed.
 	static const float maxValue = 15.0f; // Safe upper bound for user-provided --wind-speed.
@@ -242,6 +275,26 @@ struct PBDDropRuntimeState {
 static PBDDropRuntimeState g_pbdDropRuntime;
 static float g_pbdDropStartupSphereRadius = PBDSystemParam::sphere_radius;
 
+struct PBDFloorRuntimeState {
+	bool initialized = false;
+	bool paused = false;
+	float defaultSelfCollisionStiffness = PBDFloorDemoParam::selfCollisionStiffness;
+	unsigned int defaultMaxSelfCollisionContacts = PBDFloorDemoParam::maxSelfCollisionContactsPerVertex;
+	float defaultSelfCollisionThickness = 0.0f;
+	float defaultFloorFriction = 0.15f;
+	float defaultBend = PBDSystemParam::k_bend;
+	float defaultDamping = PBDSystemParam::a;
+	unsigned int solverIterations = static_cast<unsigned int>(PBDFloorDemoParam::n_iter);
+	float currentTimestep = PBDFloorDemoParam::h;
+	int speedPresetIndex = 0;
+	bool customTimestep = false;
+	unsigned int currentMeshResolution = PBDFloorControlParam::defaultMeshResolution;
+	unsigned int pendingMeshResolution = PBDFloorControlParam::defaultMeshResolution;
+	bool debugEnabled = false;
+};
+
+static PBDFloorRuntimeState g_pbdFloorRuntime;
+
 // F U N C T I O N S //////////////////////////////////////////////////////////////
 // state initialization
 static void initGlutState(int, char**);
@@ -267,9 +320,28 @@ static unsigned int nextPBDDropResolution(unsigned int resolution);
 static void configurePBDDropSolver(float stretch, float shear, float bend, float damping, unsigned int iterations, float sphereRadius, unsigned int meshResolution, bool captureDefaults);
 static void resetPBDDropDemo(bool resetParameters);
 static void logPBDDropControlState(const std::string& reason);
+static unsigned int previousPBDFloorResolution(unsigned int resolution);
+static unsigned int nextPBDFloorResolution(unsigned int resolution);
+static int closestPBDFloorSpeedPreset(float dt);
+static void setPBDFloorRuntimeTimestep(float dt, int presetIndex, bool custom);
+static void configurePBDFloorSolver(
+	float selfCollisionStiffness,
+	unsigned int maxContactsPerVertex,
+	float selfCollisionThickness,
+	float floorFriction,
+	float bend,
+	float damping,
+	unsigned int iterations,
+	float timestep,
+	unsigned int meshResolution,
+	bool captureDefaults
+);
+static void resetPBDFloorDemo(bool resetParameters);
+static void logPBDFloorControlState(const std::string& reason);
 static void drawBitmapText(float x, float y, const std::string& text);
 static void drawPBDHangOverlay();
 static void drawPBDDropOverlay();
+static void drawPBDFloorOverlay();
 static glm::mat4 floorShadowMatrix(float planeHeight, const glm::vec3& lightDirection);
 static void orientClothForFloorDrop();
 static void orientClothFlatForDualFloorDrop();
@@ -549,14 +621,15 @@ static void parseOptionalArgs(int argc, char** argv, int startIndex) {
 		}
 
 		if (arg == "--iters") {
-			if (g_mode != SimMode::PBDHang && g_mode != SimMode::PBDDrop) {
-				throw std::runtime_error("--iters is only valid for the pbd hang or pbd drop demo");
+			if (g_mode != SimMode::PBDHang && g_mode != SimMode::PBDDrop && g_mode != SimMode::PBDDropFloor) {
+				throw std::runtime_error("--iters is only valid for the pbd hang, pbd drop, or pbd drop-floor demo");
 			}
 			if (i + 1 >= argc) {
 				throw std::runtime_error("Missing value after --iters");
 			}
 			if ((g_mode == SimMode::PBDHang && g_pbdHangIterationsOverride != 0u)
-				|| (g_mode == SimMode::PBDDrop && g_pbdDropIterationsOverride != 0u)) {
+				|| (g_mode == SimMode::PBDDrop && g_pbdDropIterationsOverride != 0u)
+				|| (g_mode == SimMode::PBDDropFloor && g_pbdFloorIterationsOverride != 0u)) {
 				throw std::runtime_error("Specify --iters only once");
 			}
 
@@ -574,9 +647,33 @@ static void parseOptionalArgs(int argc, char** argv, int startIndex) {
 			if (g_mode == SimMode::PBDHang) {
 				g_pbdHangIterationsOverride = static_cast<unsigned int>(iterations);
 			}
-			else {
+			else if (g_mode == SimMode::PBDDrop) {
 				g_pbdDropIterationsOverride = static_cast<unsigned int>(iterations);
 			}
+			else {
+				g_pbdFloorIterationsOverride = static_cast<unsigned int>(iterations);
+			}
+			continue;
+		}
+
+		if (arg == "--dt") {
+			if (g_mode != SimMode::PBDDropFloor) {
+				throw std::runtime_error("--dt is only valid for the pbd drop-floor demo");
+			}
+			if (i + 1 >= argc) {
+				throw std::runtime_error("Missing value after --dt");
+			}
+
+			std::stringstream valueStream(argv[++i]);
+			float dt = 0.0f;
+			valueStream >> dt;
+			if (!valueStream || !valueStream.eof()
+				|| dt < PBDFloorCliParam::minTimestep
+				|| dt > PBDFloorCliParam::maxTimestep) {
+				throw std::runtime_error("--dt expects a float value in [0.001, 0.01]");
+			}
+
+			g_pbdFloorTimestepOverride = dt;
 			continue;
 		}
 
@@ -1302,6 +1399,236 @@ static void logPBDDropControlState(const std::string& reason) {
 	std::cout << (g_pbdDropRuntime.paused ? ", paused" : ", running") << std::endl;
 }
 
+static unsigned int previousPBDFloorResolution(unsigned int resolution) {
+	for (std::size_t i = 0; i < PBDFloorControlParam::meshChoices.size(); ++i) {
+		if (PBDFloorControlParam::meshChoices[i] == resolution) {
+			return (i == 0u)
+				? PBDFloorControlParam::meshChoices.front()
+				: PBDFloorControlParam::meshChoices[i - 1u];
+		}
+	}
+	return PBDFloorControlParam::meshChoices.front();
+}
+
+static unsigned int nextPBDFloorResolution(unsigned int resolution) {
+	for (std::size_t i = 0; i < PBDFloorControlParam::meshChoices.size(); ++i) {
+		if (PBDFloorControlParam::meshChoices[i] == resolution) {
+			return (i + 1u >= PBDFloorControlParam::meshChoices.size())
+				? PBDFloorControlParam::meshChoices.back()
+				: PBDFloorControlParam::meshChoices[i + 1u];
+		}
+	}
+	return PBDFloorControlParam::meshChoices.back();
+}
+
+static int closestPBDFloorSpeedPreset(float dt) {
+	int bestIndex = 0;
+	float bestDistance = std::abs(dt - PBDFloorControlParam::speedPresets[0]);
+	for (std::size_t i = 1; i < PBDFloorControlParam::speedPresets.size(); ++i) {
+		const float distance = std::abs(dt - PBDFloorControlParam::speedPresets[i]);
+		if (distance < bestDistance) {
+			bestDistance = distance;
+			bestIndex = static_cast<int>(i);
+		}
+	}
+	return bestIndex;
+}
+
+static void setPBDFloorRuntimeTimestep(float dt, int presetIndex, bool custom) {
+	g_pbdFloorRuntime.currentTimestep = std::max(PBDFloorCliParam::minTimestep, std::min(PBDFloorCliParam::maxTimestep, dt));
+	g_pbdFloorRuntime.speedPresetIndex = presetIndex;
+	g_pbdFloorRuntime.customTimestep = custom;
+	if (g_pbdSystem != nullptr) {
+		g_pbdSystem->time_step = g_pbdFloorRuntime.currentTimestep;
+	}
+}
+
+static void configurePBDFloorSolver(
+	float selfCollisionStiffness,
+	unsigned int maxContactsPerVertex,
+	float selfCollisionThickness,
+	float floorFriction,
+	float bend,
+	float damping,
+	unsigned int iterations,
+	float timestep,
+	unsigned int meshResolution,
+	bool captureDefaults
+) {
+	if (UI != nullptr) {
+		UI->releasePoint();
+	}
+
+	delete g_pbdSolver;
+	g_pbdSolver = nullptr;
+	delete g_pbdSystem;
+	g_pbdSystem = nullptr;
+
+	// Mesh resolution changes particle, constraint, and contact counts, so it
+	// must be applied by rebuilding the cloth system instead of changing live.
+	rebuildClothMesh(meshResolution);
+	orientClothForFloorDrop();
+
+	const float totalClothMass = PBDSystemParam::m * static_cast<float>(PBDSystemParam::n * PBDSystemParam::n);
+	const float pointMass = totalClothMass / static_cast<float>(meshResolution * meshResolution);
+
+	MassSpringBuilder builder;
+	builder.uniformGrid(
+		meshResolution,
+		PBDSystemParam::h,
+		PBDSystemParam::w / static_cast<float>(meshResolution - 1u),
+		1.0f,
+		pointMass,
+		PBDSystemParam::a,
+		PBDSystemParam::g
+	);
+
+	mass_spring_system* temp = builder.getResult();
+	g_pbdSystem = buildPBDSystem(*temp);
+	delete temp;
+	g_pbdSystem->time_step = timestep;
+	g_pbdSolver = new PBDSolver(g_pbdSystem, g_clothMesh->vbuff());
+	g_pbdSolver->setSolverIterations(iterations);
+
+	// Self-collision stiffness controls how strongly self-collision inequality
+	// constraints are projected each iteration.
+	g_pbdSolver->setSelfCollisionStiffness(std::max(
+		PBDFloorControlParam::selfCollisionStiffnessMin,
+		std::min(PBDFloorControlParam::selfCollisionStiffnessMax, selfCollisionStiffness)
+	));
+	// Max contacts per vertex prevents over-constraining/conflicting contacts.
+	g_pbdSolver->setMaxSelfCollisionContactsPerVertex(std::max(
+		PBDFloorControlParam::minSelfCollisionContacts,
+		std::min(PBDFloorControlParam::maxSelfCollisionContacts, maxContactsPerVertex)
+	));
+
+	if (g_selfCollisionThicknessOverride > 0.0f) {
+		g_pbdSolver->setSelfCollisionThickness(g_selfCollisionThicknessOverride);
+	}
+	else {
+		// Self-collision thickness is the h term in
+		// C(q,p1,p2,p3) = (q - p1) . n - h >= 0.
+		g_pbdSolver->setSelfCollisionThickness(std::max(
+			PBDFloorControlParam::selfCollisionThicknessMin,
+			std::min(PBDFloorControlParam::selfCollisionThicknessMax, selfCollisionThickness)
+		));
+	}
+
+	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), PBDSystemParam::k_stretch);
+	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
+	g_pbdSolver->addBendConstraints(builder.getBendIndex(), bend);
+
+	const Eigen::Vector3f floorPoint(0.0f, 0.0f, g_floor_collision_height);
+	const Eigen::Vector3f floorNormal(0.0f, 0.0f, 1.0f);
+	g_pbdSolver->addPlaneCollider(floorPoint, floorNormal);
+	// Floor friction is velocity-level tangential damping after contact.
+	g_pbdSolver->setPlaneFriction(std::max(
+		PBDFloorControlParam::floorFrictionMin,
+		std::min(PBDFloorControlParam::floorFrictionMax, floorFriction)
+	));
+	// Bend stiffness controls resistance to folding/unrolling.
+	g_pbdSolver->setBendStiffness(std::max(
+		PBDFloorControlParam::bendMin,
+		std::min(PBDFloorControlParam::bendMax, bend)
+	));
+	// Damping controls velocity energy decay.
+	g_pbdSolver->setDampingFactor(std::max(
+		PBDFloorControlParam::dampingMin,
+		std::min(PBDFloorControlParam::dampingMax, damping)
+	));
+
+	g_pbdFrameCounter = 0u;
+	initMouseInteraction(g_pbdSolver, meshResolution);
+
+	g_pbdFloorRuntime.currentMeshResolution = meshResolution;
+	g_pbdFloorRuntime.pendingMeshResolution = meshResolution;
+	g_pbdFloorRuntime.solverIterations = iterations;
+	g_pbdFloorRuntime.debugEnabled = g_enableDebugDiagnostics;
+
+	const int closestPreset = closestPBDFloorSpeedPreset(timestep);
+	const bool customTimestep = std::abs(timestep - PBDFloorControlParam::speedPresets[closestPreset]) > 1e-5f;
+	setPBDFloorRuntimeTimestep(timestep, closestPreset, customTimestep);
+
+	if (captureDefaults || !g_pbdFloorRuntime.initialized) {
+		g_pbdFloorRuntime.defaultSelfCollisionStiffness = g_pbdSolver->getSelfCollisionStiffness();
+		g_pbdFloorRuntime.defaultMaxSelfCollisionContacts = g_pbdSolver->getMaxSelfCollisionContactsPerVertex();
+		g_pbdFloorRuntime.defaultSelfCollisionThickness = g_pbdSolver->getSelfCollisionThickness();
+		g_pbdFloorRuntime.defaultFloorFriction = g_pbdSolver->getPlaneFriction();
+		g_pbdFloorRuntime.defaultBend = g_pbdSolver->getBendStiffness();
+		g_pbdFloorRuntime.defaultDamping = g_pbdSolver->getDampingFactor();
+		g_pbdFloorRuntime.initialized = true;
+	}
+}
+
+static void resetPBDFloorDemo(bool resetParameters) {
+	if (g_mode != SimMode::PBDDropFloor || g_pbdSolver == nullptr || !g_pbdFloorRuntime.initialized) return;
+
+	if (resetParameters) {
+		g_pbdSolver->setSelfCollisionStiffness(g_pbdFloorRuntime.defaultSelfCollisionStiffness);
+		g_pbdSolver->setMaxSelfCollisionContactsPerVertex(g_pbdFloorRuntime.defaultMaxSelfCollisionContacts);
+		if (g_selfCollisionThicknessOverride > 0.0f) {
+			g_pbdSolver->setSelfCollisionThickness(g_selfCollisionThicknessOverride);
+		}
+		else {
+			g_pbdSolver->setSelfCollisionThickness(g_pbdFloorRuntime.defaultSelfCollisionThickness);
+		}
+		g_pbdSolver->setPlaneFriction(g_pbdFloorRuntime.defaultFloorFriction);
+		g_pbdSolver->setBendStiffness(g_pbdFloorRuntime.defaultBend);
+		g_pbdSolver->setDampingFactor(g_pbdFloorRuntime.defaultDamping);
+		g_pbdFloorRuntime.pendingMeshResolution = PBDFloorControlParam::defaultMeshResolution;
+		setPBDFloorRuntimeTimestep(PBDFloorControlParam::speedPresets[0], 0, false);
+		g_enableDebugDiagnostics = g_pbdFloorRuntime.debugEnabled;
+		logPBDFloorControlState("reset-parameters");
+		glutPostRedisplay();
+		return;
+	}
+
+	g_mouseClickDown = false;
+	g_mouseLClickButton = false;
+	g_mouseRClickButton = false;
+	g_mouseMClickButton = false;
+
+	configurePBDFloorSolver(
+		g_pbdSolver->getSelfCollisionStiffness(),
+		g_pbdSolver->getMaxSelfCollisionContactsPerVertex(),
+		g_pbdSolver->getSelfCollisionThickness(),
+		g_pbdSolver->getPlaneFriction(),
+		g_pbdSolver->getBendStiffness(),
+		g_pbdSolver->getDampingFactor(),
+		g_pbdFloorRuntime.solverIterations,
+		g_pbdFloorRuntime.currentTimestep,
+		g_pbdFloorRuntime.pendingMeshResolution,
+		false
+	);
+	logPBDFloorControlState("reset-cloth");
+	glutPostRedisplay();
+}
+
+static void logPBDFloorControlState(const std::string& reason) {
+	if (g_mode != SimMode::PBDDropFloor || g_pbdSolver == nullptr) return;
+	std::cout
+		<< "[pbd drop-floor controls] " << reason
+		<< " dt=" << g_pbdFloorRuntime.currentTimestep
+		<< ", iters=" << g_pbdFloorRuntime.solverIterations
+		<< ", self-k=" << g_pbdSolver->getSelfCollisionStiffness()
+		<< ", max-contacts=" << g_pbdSolver->getMaxSelfCollisionContactsPerVertex()
+		<< ", self-thickness=" << g_pbdSolver->getSelfCollisionThickness()
+		<< ", floor-friction=" << g_pbdSolver->getPlaneFriction()
+		<< ", bend=" << g_pbdSolver->getBendStiffness()
+		<< ", damping=" << g_pbdSolver->getDampingFactor()
+		<< ", mesh=" << g_pbdFloorRuntime.currentMeshResolution << "x" << g_pbdFloorRuntime.currentMeshResolution;
+	if (g_pbdFloorRuntime.pendingMeshResolution != g_pbdFloorRuntime.currentMeshResolution) {
+		std::cout << ", pending-mesh=" << g_pbdFloorRuntime.pendingMeshResolution << "x" << g_pbdFloorRuntime.pendingMeshResolution;
+	}
+	std::cout
+		<< ", debug=" << (g_enableDebugDiagnostics ? "on" : "off")
+		<< (g_pbdFloorRuntime.paused ? ", paused" : ", running")
+		<< std::endl;
+	if (g_pbdFloorRuntime.speedPresetIndex > 0) {
+		std::cout << "[pbd drop-floor controls] faster timestep may increase penetration, jitter, or missed self-collision" << std::endl;
+	}
+}
+
 static pbd_system* buildPBDSystem(const mass_spring_system& system) {
 	pbd_system* pbdSystem = new pbd_system;
 	pbdSystem->n_points = system.n_points;
@@ -1526,38 +1853,25 @@ static void demo_pbd_drop() {
 }
 
 static void demo_pbd_drop_floor() {
-	const unsigned int n = PBDSystemParam::n;
-	const Eigen::Vector3f floorPoint(0.0f, 0.0f, g_floor_collision_height);
-	const Eigen::Vector3f floorNormal(0.0f, 0.0f, 1.0f);
-	orientClothForFloorDrop();
-	MassSpringBuilder builder;
-	builder.uniformGrid(
-		PBDSystemParam::n,
-		PBDSystemParam::h,
-		PBDSystemParam::r,
-		1.0f,
-		PBDSystemParam::m,
-		PBDSystemParam::a,
-		PBDSystemParam::g
+	const unsigned int iterations = (g_pbdFloorIterationsOverride > 0u)
+		? g_pbdFloorIterationsOverride
+		: static_cast<unsigned int>(PBDFloorDemoParam::n_iter);
+	const float timestep = (g_pbdFloorTimestepOverride > 0.0f)
+		? g_pbdFloorTimestepOverride
+		: PBDFloorDemoParam::h;
+	configurePBDFloorSolver(
+		PBDFloorDemoParam::selfCollisionStiffness,
+		PBDFloorDemoParam::maxSelfCollisionContactsPerVertex,
+		(g_selfCollisionThicknessOverride > 0.0f) ? g_selfCollisionThicknessOverride : PBDFloorControlParam::selfCollisionThicknessMin,
+		0.15f,
+		PBDSystemParam::k_bend,
+		0.07f,
+		iterations,
+		timestep,
+		PBDFloorControlParam::defaultMeshResolution,
+		true
 	);
-
-	mass_spring_system* temp = builder.getResult();
-	g_pbdSystem = buildPBDSystem(*temp);
-	delete temp;
-	g_pbdSystem->time_step = PBDFloorDemoParam::h;
-	g_pbdSolver = new PBDSolver(g_pbdSystem, g_clothMesh->vbuff());
-	g_pbdSolver->setSolverIterations(PBDFloorDemoParam::n_iter);
-	g_pbdSolver->setSelfCollisionStiffness(PBDFloorDemoParam::selfCollisionStiffness);
-	g_pbdSolver->setMaxSelfCollisionContactsPerVertex(PBDFloorDemoParam::maxSelfCollisionContactsPerVertex);
-	if (g_selfCollisionThicknessOverride > 0.0f) {
-		g_pbdSolver->setSelfCollisionThickness(g_selfCollisionThicknessOverride);
-	}
-	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), PBDSystemParam::k_stretch);
-	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
-	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDSystemParam::k_bend);
-	g_pbdSolver->addPlaneCollider(floorPoint, floorNormal);
-	g_pbdFrameCounter = 0u;
-	initMouseInteraction(g_pbdSolver, n);
+	logPBDFloorControlState("startup");
 }
 
 static void demo_pbd_drop_floor_dual() {
@@ -1657,6 +1971,7 @@ static void display() {
 	drawCloth();
 	drawPBDHangOverlay();
 	drawPBDDropOverlay();
+	drawPBDFloorOverlay();
 	glutSwapBuffers();
 
 	checkGlErrors();
@@ -1757,6 +2072,149 @@ static void keyboard(unsigned char key, int, int) {
 	}
 
 	if (g_mode != SimMode::PBDDrop) {
+		if (g_mode != SimMode::PBDDropFloor) {
+			return;
+		}
+
+		switch (key) {
+		case '1':
+			// Self-collision stiffness controls how strongly self-collision
+			// inequality constraints are projected.
+			g_pbdSolver->setSelfCollisionStiffness(std::max(
+				PBDFloorControlParam::selfCollisionStiffnessMin,
+				g_pbdSolver->getSelfCollisionStiffness() - PBDFloorControlParam::selfCollisionStiffnessStep
+			));
+			logPBDFloorControlState("self-k-");
+			break;
+		case '2':
+			g_pbdSolver->setSelfCollisionStiffness(std::min(
+				PBDFloorControlParam::selfCollisionStiffnessMax,
+				g_pbdSolver->getSelfCollisionStiffness() + PBDFloorControlParam::selfCollisionStiffnessStep
+			));
+			logPBDFloorControlState("self-k+");
+			break;
+		case '3':
+			g_pbdSolver->setMaxSelfCollisionContactsPerVertex(std::max(
+				PBDFloorControlParam::minSelfCollisionContacts,
+				g_pbdSolver->getMaxSelfCollisionContactsPerVertex() - 1u
+			));
+			logPBDFloorControlState("max-contacts-");
+			break;
+		case '4':
+			g_pbdSolver->setMaxSelfCollisionContactsPerVertex(std::min(
+				PBDFloorControlParam::maxSelfCollisionContacts,
+				g_pbdSolver->getMaxSelfCollisionContactsPerVertex() + 1u
+			));
+			logPBDFloorControlState("max-contacts+");
+			break;
+		case '5':
+			g_pbdSolver->setSelfCollisionThickness(std::max(
+				PBDFloorControlParam::selfCollisionThicknessMin,
+				g_pbdSolver->getSelfCollisionThickness() - PBDFloorControlParam::selfCollisionThicknessStep
+			));
+			logPBDFloorControlState("self-thickness-");
+			break;
+		case '6':
+			g_pbdSolver->setSelfCollisionThickness(std::min(
+				PBDFloorControlParam::selfCollisionThicknessMax,
+				g_pbdSolver->getSelfCollisionThickness() + PBDFloorControlParam::selfCollisionThicknessStep
+			));
+			logPBDFloorControlState("self-thickness+");
+			break;
+		case '7':
+			// Floor friction is velocity-level tangential damping after contact.
+			g_pbdSolver->setPlaneFriction(std::max(
+				PBDFloorControlParam::floorFrictionMin,
+				g_pbdSolver->getPlaneFriction() - PBDFloorControlParam::floorFrictionStep
+			));
+			logPBDFloorControlState("floor-friction-");
+			break;
+		case '8':
+			g_pbdSolver->setPlaneFriction(std::min(
+				PBDFloorControlParam::floorFrictionMax,
+				g_pbdSolver->getPlaneFriction() + PBDFloorControlParam::floorFrictionStep
+			));
+			logPBDFloorControlState("floor-friction+");
+			break;
+		case 'q':
+		case 'Q':
+			g_pbdSolver->setBendStiffness(std::max(
+				PBDFloorControlParam::bendMin,
+				g_pbdSolver->getBendStiffness() - PBDFloorControlParam::bendStep
+			));
+			logPBDFloorControlState("bend-");
+			break;
+		case 'w':
+		case 'W':
+			g_pbdSolver->setBendStiffness(std::min(
+				PBDFloorControlParam::bendMax,
+				g_pbdSolver->getBendStiffness() + PBDFloorControlParam::bendStep
+			));
+			logPBDFloorControlState("bend+");
+			break;
+		case 'a':
+		case 'A':
+			g_pbdSolver->setDampingFactor(std::max(
+				PBDFloorControlParam::dampingMin,
+				g_pbdSolver->getDampingFactor() - PBDFloorControlParam::dampingStep
+			));
+			logPBDFloorControlState("damping-");
+			break;
+		case 's':
+		case 'S':
+			g_pbdSolver->setDampingFactor(std::min(
+				PBDFloorControlParam::dampingMax,
+				g_pbdSolver->getDampingFactor() + PBDFloorControlParam::dampingStep
+			));
+			logPBDFloorControlState("damping+");
+			break;
+		case '[':
+			g_pbdFloorRuntime.pendingMeshResolution = previousPBDFloorResolution(g_pbdFloorRuntime.pendingMeshResolution);
+			logPBDFloorControlState("pending-mesh-");
+			break;
+		case ']':
+			g_pbdFloorRuntime.pendingMeshResolution = nextPBDFloorResolution(g_pbdFloorRuntime.pendingMeshResolution);
+			logPBDFloorControlState("pending-mesh+");
+			break;
+		case '9': {
+			const int nextIndex = std::max(0, g_pbdFloorRuntime.speedPresetIndex - 1);
+			setPBDFloorRuntimeTimestep(PBDFloorControlParam::speedPresets[nextIndex], nextIndex, false);
+			logPBDFloorControlState("speed-");
+			break;
+		}
+		case '0': {
+			const int nextIndex = std::min(
+				static_cast<int>(PBDFloorControlParam::speedPresets.size()) - 1,
+				g_pbdFloorRuntime.speedPresetIndex + 1
+			);
+			setPBDFloorRuntimeTimestep(PBDFloorControlParam::speedPresets[nextIndex], nextIndex, false);
+			logPBDFloorControlState("speed+");
+			break;
+		}
+		case 'r':
+		case 'R':
+			resetPBDFloorDemo(false);
+			break;
+		case 't':
+		case 'T':
+			resetPBDFloorDemo(true);
+			break;
+		case 'p':
+		case 'P':
+			g_pbdFloorRuntime.paused = !g_pbdFloorRuntime.paused;
+			logPBDFloorControlState(g_pbdFloorRuntime.paused ? "pause" : "resume");
+			break;
+		case 'd':
+		case 'D':
+			g_enableDebugDiagnostics = !g_enableDebugDiagnostics;
+			g_pbdFloorRuntime.debugEnabled = g_enableDebugDiagnostics;
+			logPBDFloorControlState(g_enableDebugDiagnostics ? "debug-on" : "debug-off");
+			break;
+		default:
+			return;
+		}
+
+		glutPostRedisplay();
 		return;
 	}
 
@@ -2056,10 +2514,74 @@ static void drawPBDDropOverlay() {
 	}
 }
 
+static void drawPBDFloorOverlay() {
+	if (g_mode != SimMode::PBDDropFloor || g_pbdSolver == nullptr) return;
+
+	const GLboolean depthEnabled = glIsEnabled(GL_DEPTH_TEST);
+	glDisable(GL_DEPTH_TEST);
+
+	glMatrixMode(GL_PROJECTION);
+	glPushMatrix();
+	glLoadIdentity();
+	gluOrtho2D(0.0, static_cast<double>(g_windowWidth), 0.0, static_cast<double>(g_windowHeight));
+
+	glMatrixMode(GL_MODELVIEW);
+	glPushMatrix();
+	glLoadIdentity();
+	glColor3f(1.0f, 1.0f, 1.0f);
+
+	std::ostringstream line1;
+	line1 << std::fixed << std::setprecision(4)
+		<< "PBD Drop-Floor Self-Collision Demo"
+		<< "  iters=" << g_pbdFloorRuntime.solverIterations
+		<< "  dt=" << g_pbdFloorRuntime.currentTimestep;
+	if (!g_pbdFloorRuntime.customTimestep) {
+		line1 << " (" << PBDFloorControlParam::speedPresetLabels[g_pbdFloorRuntime.speedPresetIndex] << ")";
+	}
+
+	std::ostringstream line2;
+	line2 << std::fixed << std::setprecision(3)
+		<< "self-k=" << g_pbdSolver->getSelfCollisionStiffness()
+		<< "  max-contacts=" << g_pbdSolver->getMaxSelfCollisionContactsPerVertex()
+		<< "  self-thickness=" << g_pbdSolver->getSelfCollisionThickness()
+		<< "  floor-friction=" << g_pbdSolver->getPlaneFriction();
+
+	std::ostringstream line3;
+	line3 << std::fixed << std::setprecision(3)
+		<< "bend=" << g_pbdSolver->getBendStiffness()
+		<< "  damping=" << g_pbdSolver->getDampingFactor()
+		<< "  mesh=" << g_pbdFloorRuntime.currentMeshResolution << "x" << g_pbdFloorRuntime.currentMeshResolution
+		<< "  debug=" << (g_enableDebugDiagnostics ? "on" : "off")
+		<< "  state=" << (g_pbdFloorRuntime.paused ? "paused" : "running");
+
+	drawBitmapText(16.0f, g_windowHeight - 22.0f, line1.str());
+	drawBitmapText(16.0f, g_windowHeight - 40.0f, "Controls: 1/2 self-k  3/4 max contacts  5/6 thickness  7/8 friction  Q/W bend  A/S damping  [/ ] mesh  9/0 speed  R reset  T defaults  P pause  D debug");
+	drawBitmapText(16.0f, g_windowHeight - 58.0f, line2.str());
+	drawBitmapText(16.0f, g_windowHeight - 76.0f, line3.str());
+	if (g_pbdFloorRuntime.pendingMeshResolution != g_pbdFloorRuntime.currentMeshResolution) {
+		std::ostringstream pendingLine;
+		pendingLine << "Pending mesh: " << g_pbdFloorRuntime.pendingMeshResolution << "x" << g_pbdFloorRuntime.pendingMeshResolution << ", press R to apply";
+		drawBitmapText(16.0f, g_windowHeight - 94.0f, pendingLine.str());
+	}
+	if (g_pbdFloorRuntime.speedPresetIndex > 0) {
+		drawBitmapText(16.0f, g_windowHeight - 112.0f, "Warning: faster timestep may increase penetration, jitter, or missed self-collision");
+	}
+
+	glPopMatrix();
+	glMatrixMode(GL_PROJECTION);
+	glPopMatrix();
+	glMatrixMode(GL_MODELVIEW);
+
+	if (depthEnabled) {
+		glEnable(GL_DEPTH_TEST);
+	}
+}
+
 static void animateCloth(int value) {
 	if (isPBDMode()) {
 		const bool paused = (g_mode == SimMode::PBDHang && g_pbdHangRuntime.paused)
-			|| (g_mode == SimMode::PBDDrop && g_pbdDropRuntime.paused);
+			|| (g_mode == SimMode::PBDDrop && g_pbdDropRuntime.paused)
+			|| (g_mode == SimMode::PBDDropFloor && g_pbdFloorRuntime.paused);
 		if (!paused) {
 			const unsigned int iterationCount = (isFloorDemo() || g_mode == SimMode::PBDHang || g_mode == SimMode::PBDDrop)
 				? g_pbdSolver->getSolverIterations()

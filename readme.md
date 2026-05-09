@@ -96,13 +96,13 @@ Long-form mode selection:
 
 ```bash
 ./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug]
-./fast-mass-spring pbd [hang|hang-wind|drop|drop-floor|drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value]
+./fast-mass-spring pbd [hang|hang-wind|drop|drop-floor|drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value] [--iters value] [--radius value] [--dt value]
 ```
 
 Short-form mode selection:
 
 ```bash
-./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang-wind|pbd-drop|pbd-drop-floor|pbd-drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value]
+./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang-wind|pbd-drop|pbd-drop-floor|pbd-drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value] [--iters value] [--radius value] [--dt value]
 ```
 
 ### Demo Modes
@@ -113,7 +113,7 @@ Short-form mode selection:
 | Mass-spring drop | `./fast-mass-spring ms drop` | Original baseline sphere-drop demo |
 | PBD hang | `./fast-mass-spring pbd hang --iters 20` | Interactive constraint tuning demo |
 | PBD drop | `./fast-mass-spring pbd drop` | PBD cloth dropping onto a sphere |
-| PBD drop-floor | `./fast-mass-spring pbd drop-floor --debug` | Floor contact and self-collision stress test |
+| PBD drop-floor | `./fast-mass-spring pbd drop-floor --iters 28 --dt 0.003` | Floor contact and self-collision stress test |
 | PBD drop-floor-dual | `./fast-mass-spring pbd drop-floor-dual` | Cloth interaction with sphere and box obstacles |
 | PBD hang-wind | `./fast-mass-spring pbd hang-wind --wind-speed 5` | Flag-style wind demo |
 
@@ -125,6 +125,7 @@ Short-form mode selection:
 ./fast-mass-spring pbd hang --iters 20
 ./fast-mass-spring pbd drop
 ./fast-mass-spring pbd drop-floor
+./fast-mass-spring pbd drop-floor --iters 28 --dt 0.003
 ./fast-mass-spring pbd drop-floor --debug
 ./fast-mass-spring pbd drop-floor --self-thickness 0.02
 ./fast-mass-spring pbd drop-floor-dual
@@ -199,6 +200,46 @@ Parameter meaning:
 - **Mesh resolution** changes particle and constraint count and is applied only when the cloth system is rebuilt on reset.
 
 The current and pending mesh resolutions are shown in the on-screen overlay. If the pending mesh differs from the current mesh, the overlay prints `Pending mesh: NxN, press R to apply`.
+
+### PBD Drop-Floor Controls
+
+The `pbd drop-floor` demo includes an interactive tuning interface for self-collision robustness, floor response, timestep speed, and mesh-resolution comparison.
+
+Startup options:
+
+- `--iters value`: sets the number of PBD projection passes per timestep for the drop-floor demo; accepts an integer in `[1, 80]`
+- `--dt value`: sets the simulation timestep for the drop-floor demo; accepts a float in `[0.001, 0.01]`
+
+Keyboard controls:
+
+| Key | Action |
+|---|---|
+| `1 / 2` | Decrease / increase self-collision stiffness |
+| `3 / 4` | Decrease / increase max self-collision contacts per vertex |
+| `5 / 6` | Decrease / increase self-collision thickness |
+| `7 / 8` | Decrease / increase floor friction |
+| `Q / W` | Decrease / increase bend stiffness |
+| `A / S` | Decrease / increase damping factor |
+| `[` / `]` | Decrease / increase the pending mesh resolution |
+| `9 / 0` | Step to a slower / faster timestep preset |
+| `R` | Reset cloth and apply the pending mesh resolution |
+| `T` | Reset drop-floor tuning values to stable defaults |
+| `P` | Pause / resume simulation |
+| `D` | Toggle debug diagnostics |
+
+Parameter meaning:
+
+- **Self-collision stiffness** controls how strongly vertex self-collision constraints are projected apart.
+- **Max self-collision contacts** limits how many self-collision contacts are processed per vertex each solver step.
+- **Self-collision thickness** is the minimum separation band enforced between cloth layers.
+- **Floor friction** damps tangential sliding after plane contact.
+- **Bend stiffness** controls dihedral bending constraints.
+- **Damping** controls velocity energy decay.
+- **Iterations** control the number of PBD projection passes per timestep.
+- **Timestep** changes simulation speed and contact robustness; faster presets are less stable and are labeled in the overlay.
+- **Mesh resolution** changes particle and constraint count and is applied only when the cloth system is rebuilt on reset.
+
+The overlay shows the current self-collision, floor, timestep, and mesh settings. If the pending mesh differs from the current mesh, the overlay prints `Pending mesh: NxN, press R to apply`.
 
 ### Wind Demo Controls
 

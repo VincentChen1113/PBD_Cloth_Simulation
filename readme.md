@@ -1,8 +1,8 @@
 # PBD Cloth Simulation
 
 **Author Name:** Vincent Chen  
-**Course:** Stony Brook University — CSE 328: Computer Graphics
-**Name:** Hong Qin  
+**Course:** Stony Brook University — CSE 328: Computer Graphics  
+**Professor Name:** Hong Qin  
 
 
 This project was originally forked from [sam007961/FastMassSpring](https://github.com/sam007961/FastMassSpring).

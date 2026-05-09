@@ -2,8 +2,7 @@
 
 **Author Name:** Vincent Chen  
 **Course:** Stony Brook University — CSE 328: Computer Graphics (Spring 2026)
-**Professor Name:** Hong Qin
-
+**Name:** Hong Qin  
 
 
 This project was originally forked from [sam007961/FastMassSpring](https://github.com/sam007961/FastMassSpring).

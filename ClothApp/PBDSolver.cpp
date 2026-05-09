@@ -1276,15 +1276,16 @@ void PBDSolver::applyAerodynamicForces(float dt) {
 		const Vector3f relativeVelocity = objectVelocity - windVelocity;
 		const float relativeSpeed = relativeVelocity.norm();
 		if (relativeSpeed <= 1e-6f) continue;
+		const Vector3f vRelHat = relativeVelocity / relativeSpeed;
 
-		const Vector3f incomingFlowDirection = -relativeVelocity / relativeSpeed;
+		const Vector3f incomingFlowDirection = -vRelHat;
 		const float orientationFactor = std::abs(faceNormal.dot(incomingFlowDirection));
 		if (orientationFactor <= 1e-4f) continue;
 
 		// Drag-only aerodynamic force:
 		//   F_drag = -0.5 * rho * C_D * A * |v_rel|^2 * exposure * v_rel_hat
 		// where exposure is approximated with |n . (-v_rel_hat)| so broad faces
-		// catch more air than edge-on faces. Lift is intentionally omitted here.
+		// catch more air than edge-on faces.
 		const float dragMagnitude = 0.5f
 			* windConfig.airDensity
 			* windConfig.dragCoefficient
@@ -1292,12 +1293,51 @@ void PBDSolver::applyAerodynamicForces(float dt) {
 			* relativeSpeed
 			* relativeSpeed
 			* orientationFactor;
-		const Vector3f dragForce = -dragMagnitude * (relativeVelocity / relativeSpeed);
+		// Drag acts opposite the relative air velocity.
+		const Vector3f dragForce = -dragMagnitude * vRelHat;
+
+		Vector3f liftForce = Vector3f::Zero();
+		if (windConfig.liftCoefficient > 1e-6f) {
+			// Use a two-sided cloth normal so lift reacts consistently whether the
+			// wind hits the front or back side of the triangle.
+			const Vector3f adjustedNormal = (faceNormal.dot(relativeVelocity) > 0.0f)
+				? faceNormal
+				: -faceNormal;
+
+			// Paper-style lift direction:
+			//   liftDir = (n_adj x v_rel_hat) x v_rel_hat
+			// Lift acts perpendicular to relative velocity and lies in the plane
+			// spanned by the relative velocity and the cloth normal.
+			Vector3f liftDirection = adjustedNormal.cross(vRelHat).cross(vRelHat);
+			const float liftDirectionLength = liftDirection.norm();
+			if (liftDirectionLength > 1e-6f && std::isfinite(liftDirectionLength)) {
+				liftDirection /= liftDirectionLength;
+
+				// Stable lift exposure approximation based on the angle between the
+				// adjusted two-sided normal and the relative airflow direction.
+				const float liftOrientationTerm = std::abs(adjustedNormal.dot(vRelHat));
+				if (liftOrientationTerm > 1e-4f) {
+					// Optional lift force:
+					//   F_lift = 0.5 * rho * C_L * A * |v_rel|^2 * orientationTerm * liftDir
+					// Lift is optional and should be tuned carefully because large C_L
+					// values can destabilize thin cloth quickly.
+					const float liftMagnitude = 0.5f
+						* windConfig.airDensity
+						* windConfig.liftCoefficient
+						* faceArea
+						* relativeSpeed
+						* relativeSpeed
+						* liftOrientationTerm;
+					liftForce = liftMagnitude * liftDirection;
+				}
+			}
+		}
 
 		// Gust and noise are small time-varying speed modulations that create a
 		// lightweight flag-like flutter without introducing a full wind-field
 		// solver.
-		const Vector3f perVertexForce = dragForce / 3.0f;
+		const Vector3f totalForce = dragForce + liftForce;
+		const Vector3f perVertexForce = totalForce / 3.0f;
 		const unsigned int triangleVertices[3] = { i0, i1, i2 };
 		for (unsigned int localVertex = 0; localVertex < 3; ++localVertex) {
 			const unsigned int vertex = triangleVertices[localVertex];
@@ -2033,6 +2073,7 @@ void PBDSolver::setWindConfig(const PBDWindConfig& config) {
 	windConfig.gustFrequency = std::max(0.0f, windConfig.gustFrequency);
 	windConfig.noiseStrength = std::max(0.0f, windConfig.noiseStrength);
 	windConfig.dragCoefficient = std::max(0.0f, windConfig.dragCoefficient);
+	windConfig.liftCoefficient = std::max(0.0f, std::min(2.0f, windConfig.liftCoefficient));
 	windConfig.airDensity = std::max(0.0f, windConfig.airDensity);
 	windConfig.maxWindSpeed = std::max(0.0f, windConfig.maxWindSpeed);
 

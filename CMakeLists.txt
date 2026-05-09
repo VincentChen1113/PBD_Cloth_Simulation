@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.10.0)
 
+if(POLICY CMP0072)
+  cmake_policy(SET CMP0072 NEW)
+endif()
+
 project(fast-mass-spring)
+
+set(OpenGL_GL_PREFERENCE GLVND)
 
 set(Sources
     ClothApp/app.cpp
@@ -66,10 +72,11 @@ endif()
 add_executable(fast-mass-spring ${Sources})
 target_link_libraries(fast-mass-spring ${OPENGL_LIBRARIES} ${GLUT_LIBRARIES} ${GLEW_LIBRARIES} OpenMeshCore eigen glm)
 
-# copy shaders to binary directory on every build so newly added shader files
-# are available without requiring a manual reconfigure.
-add_custom_command(TARGET fast-mass-spring POST_BUILD
+# copy shaders to binary directory on every build.
+add_custom_target(copy_shaders ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory
           ${CMAKE_CURRENT_SOURCE_DIR}/ClothApp/shaders
           ${CMAKE_CURRENT_BINARY_DIR}/shaders
 )
+
+add_dependencies(fast-mass-spring copy_shaders)

@@ -50,7 +50,7 @@ The current PBD solver includes:
 - sphere and plane collision as generated inequality constraints
 - self-collision detection and resolution with debug counters
 - a dedicated `drop-floor` scene for floor interaction and tuning
-- a `hang-wind` scene with drag-only aerodynamic forcing, gust modulation, and procedural flutter noise
+- a `hang-wind` scene with triangle-based aerodynamic drag and lift, gust modulation, and procedural flutter noise
 
 ### Demo
 
@@ -67,8 +67,9 @@ The wind demo configures the cloth like a flag:
 
 - one side edge is pinned like cloth attached to a pole
 - wind blows horizontally, perpendicular to gravity
-- aerodynamic forcing uses a **drag-only** triangle-based model
+- aerodynamic forcing uses a triangle-based **drag + lift** model
 - gusts and small procedural noise modulate the base wind speed over time
+- the default lift term is enabled in the demo configuration with a moderate coefficient for extra billowing
 
 The current wind speed is controlled explicitly from the command line with `--wind-speed`.
 
@@ -96,6 +97,7 @@ cmake --build .
 Notes:
 
 - Run the executable from the `build` directory so shader paths resolve correctly.
+- Shader files are copied from `ClothApp/shaders` into `build/shaders` during every build.
 - The project fetches **OpenMesh**, **Eigen**, and **GLM** through CMake.
 - Eigen is used as a header-only dependency in the current CMake setup.
 
@@ -138,7 +140,7 @@ Examples:
 Flags:
 
 - `--self-thickness value`: overrides the PBD self-collision thickness with a positive float value
-- `--wind-speed value`: required for `pbd hang-wind`; accepts a float in `[0, 15]` and sets the base horizontal wind speed used by the drag/gust model
+- `--wind-speed value`: required for `pbd hang-wind`; accepts a float in `[0, 15]` and sets the base horizontal wind speed used by the drag/lift/gust model
 - `--debug`: enables debug diagnostics output for PBD demos and prints self-collision counters to the terminal
 
 If no arguments are provided, the program defaults to the mass-spring hanging cloth demo.

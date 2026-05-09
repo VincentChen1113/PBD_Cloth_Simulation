@@ -127,7 +127,7 @@ namespace PBDSystemParam {
 	static const float a = 0.02f; // damping factor
 	static const float eps = 1e-4f; // collision epsilon
 	static const float k_stretch = 0.9f; // stretch stiffness | 1.0f
-	static const float k_shear = 0.8f; // shear stiffness | 0.8f
+	static const float k_shear = 0.9f; // shear stiffness | 0.8f
 	static const float k_bend = 0.01f; // bend stiffness | 0.01f
 	static const float sphere_radius = 0.64f;  // radius of sphere collider in drop demo | 0.64f
 }
@@ -151,6 +151,7 @@ namespace PBDWindCliParam {
 	static const float gustFrequency = 1.35f; // Gust frequency in u(t) = u_base + A_gust * sin(2 * pi * gustFrequency * t) + noise(t, x).
 	static const float noiseFraction = 0.08f; // Small procedural flutter scale added to u(t) after the sinusoidal gust term.
 	static const float dragCoefficient = 1.15f; // Drag coefficient C_D in F_drag = 0.5 * rho * C_D * A * |v_rel|^2 * exposure.
+	static const float liftCoefficient = 0.35f; // Lift coefficient C_L in F_lift = 0.5 * rho * C_L * A * |v_rel|^2 * orientationTerm.
 	static const float airDensity = 1.225f; // Air density rho used by the drag-only aerodynamic force.
 	static const float dampingFactor = 0.06f; // Velocity damping for the wind demo to keep flutter stable.
 	static const float bendStiffness = 0.008f; // Softer bending stiffness so the flag can ripple under gusts.
@@ -981,6 +982,8 @@ static void demo_pbd_hang() {
 
 static void demo_pbd_hang_wind() {
 	const unsigned int n = PBDSystemParam::n;
+	const Eigen::Vector3f floorPoint(0.0f, 0.0f, g_floor_collision_height);
+	const Eigen::Vector3f floorNormal(0.0f, 0.0f, 1.0f);
 	orientClothForWindFlag();
 
 	MassSpringBuilder builder;
@@ -1015,6 +1018,7 @@ static void demo_pbd_hang_wind() {
 	windConfig.gustFrequency = PBDWindCliParam::gustFrequency;
 	windConfig.noiseStrength = PBDWindCliParam::noiseFraction * gustReference;
 	windConfig.dragCoefficient = PBDWindCliParam::dragCoefficient;
+	windConfig.liftCoefficient = PBDWindCliParam::liftCoefficient;
 	windConfig.airDensity = PBDWindCliParam::airDensity;
 	windConfig.maxWindSpeed = PBDWindCliParam::maxValue;
 	g_pbdSolver->setWindConfig(windConfig);
@@ -1022,6 +1026,7 @@ static void demo_pbd_hang_wind() {
 	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), PBDSystemParam::k_stretch);
 	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
 	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDWindCliParam::bendStiffness);
+	g_pbdSolver->addPlaneCollider(floorPoint, floorNormal);
 	for (unsigned int row = 0; row < n; ++row) {
 		g_pbdSolver->pinPoint(row * n);
 	}
@@ -1036,6 +1041,7 @@ static void demo_pbd_hang_wind() {
 		<< ", gust-frequency=" << windConfig.gustFrequency
 		<< ", noise-strength=" << windConfig.noiseStrength
 		<< ", Cd=" << windConfig.dragCoefficient
+		<< ", Cl=" << windConfig.liftCoefficient
 		<< ", rho=" << windConfig.airDensity
 		<< std::endl;
 	g_pbdFrameCounter = 0u;
@@ -1176,6 +1182,7 @@ static void display() {
 		renderer.setProgram(g_phongShader);
 		renderer.setModelview(g_ModelViewMatrix);
 		renderer.setProjection(g_ProjectionMatrix);
+		g_phongShader->setUseFlagPattern(false);
 		g_phongShader->setAlbedo(g_sphere_albedo);
 		g_phongShader->setAmbient(g_sphere_ambient);
 		g_phongShader->setLight(g_light);
@@ -1190,6 +1197,7 @@ static void display() {
 		renderer.setProgram(g_phongShader);
 		renderer.setModelview(g_ModelViewMatrix);
 		renderer.setProjection(g_ProjectionMatrix);
+		g_phongShader->setUseFlagPattern(false);
 		g_phongShader->setAlbedo(g_sphere_albedo);
 		g_phongShader->setAmbient(g_sphere_ambient);
 		g_phongShader->setLight(g_light);
@@ -1259,6 +1267,7 @@ static void drawFloor() {
 	renderer.setProgram(g_phongShader);
 	renderer.setModelview(g_ModelViewMatrix);
 	renderer.setProjection(g_ProjectionMatrix);
+	g_phongShader->setUseFlagPattern(false);
 	g_phongShader->setAlbedo(g_floor_albedo);
 	g_phongShader->setAmbient(g_floor_ambient);
 	g_phongShader->setLight(g_light);
@@ -1309,6 +1318,7 @@ static void drawCloth() {
 	renderer.setProgram(g_phongShader);
 	renderer.setModelview(g_ModelViewMatrix);
 	renderer.setProjection(g_ProjectionMatrix);
+	g_phongShader->setUseFlagPattern(g_mode == SimMode::PBDHangWind);
 	g_phongShader->setAlbedo(g_albedo);
 	g_phongShader->setAmbient(g_ambient);
 	g_phongShader->setLight(g_light);

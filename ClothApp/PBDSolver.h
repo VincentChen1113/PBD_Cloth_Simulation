@@ -260,6 +260,7 @@ struct PBDWindConfig {
 	float gustFrequency = 1.35f;
 	float noiseStrength = 0.0f;
 	float dragCoefficient = 1.15f;
+	float liftCoefficient = 0.35f;
 	float airDensity = 1.225f;
 	float maxWindSpeed = 15.0f;
 };

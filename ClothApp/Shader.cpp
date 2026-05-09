@@ -167,6 +167,7 @@ void PhongShader::postLink() {
 	uLight = glGetUniformLocation(handle, "uLight");
 	uSpecularStrength = glGetUniformLocation(handle, "uSpecularStrength");
 	uShininess = glGetUniformLocation(handle, "uShininess");
+	uUseFlagPattern = glGetUniformLocation(handle, "uUseFlagPattern");
 }
 void PhongShader::setAlbedo(const glm::vec3& albedo) {
 	assert(uAlbedo >= 0);
@@ -196,6 +197,13 @@ void PhongShader::setShininess(float shininess) {
 	assert(uShininess >= 0);
 	glUseProgram(*this);
 	glUniform1f(uShininess, shininess);
+	glUseProgram(0);
+}
+
+void PhongShader::setUseFlagPattern(bool useFlagPattern) {
+	assert(uUseFlagPattern >= 0);
+	glUseProgram(*this);
+	glUniform1i(uUseFlagPattern, useFlagPattern ? 1 : 0);
 	glUseProgram(0);
 }
 

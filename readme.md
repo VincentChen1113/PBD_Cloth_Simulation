@@ -114,7 +114,7 @@ Short-form mode selection:
 | PBD hang | `./fast-mass-spring pbd hang --iters 20` | Interactive constraint tuning demo |
 | PBD drop | `./fast-mass-spring pbd drop` | PBD cloth dropping onto a sphere |
 | PBD drop-floor | `./fast-mass-spring pbd drop-floor --iters 28 --dt 0.003` | Floor contact and self-collision stress test |
-| PBD drop-floor-dual | `./fast-mass-spring pbd drop-floor-dual` | Cloth interaction with sphere and box obstacles |
+| PBD drop-floor-dual | `./fast-mass-spring pbd drop-floor-dual --iters 28` | Cloth interaction with sphere and box obstacles |
 | PBD hang-wind | `./fast-mass-spring pbd hang-wind --wind-speed 5` | Flag-style wind demo |
 
 ### Example Commands
@@ -129,6 +129,7 @@ Short-form mode selection:
 ./fast-mass-spring pbd drop-floor --debug
 ./fast-mass-spring pbd drop-floor --self-thickness 0.02
 ./fast-mass-spring pbd drop-floor-dual
+./fast-mass-spring pbd drop-floor-dual --iters 28
 ./fast-mass-spring pbd hang-wind --wind-speed 5
 ./fast-mass-spring pbd-hang-wind --wind-speed 8
 ```
@@ -240,6 +241,42 @@ Parameter meaning:
 - **Mesh resolution** changes particle and constraint count and is applied only when the cloth system is rebuilt on reset.
 
 The overlay shows the current self-collision, floor, timestep, and mesh settings. If the pending mesh differs from the current mesh, the overlay prints `Pending mesh: NxN, press R to apply`.
+
+### PBD Drop-Floor-Dual Controls
+
+The `pbd drop-floor-dual` demo includes a simple interactive interface for comparing how the cloth drapes over a smooth sphere versus a sharp cube.
+
+Startup option:
+
+- `--iters value`: sets the number of PBD projection passes per timestep for the dual-obstacle demo; accepts an integer in `[1, 80]`
+
+Keyboard controls:
+
+| Key | Action |
+|---|---|
+| `1 / 2` | Decrease / increase stretch stiffness |
+| `3 / 4` | Decrease / increase shear stiffness |
+| `5 / 6` | Decrease / increase bend stiffness |
+| `[` / `]` | Decrease / increase the pending mesh resolution |
+| `Q / W` | Decrease / increase the pending sphere radius |
+| `A / S` | Decrease / increase the pending cube size |
+| `9 / 0` | Step to a slower / faster timestep preset |
+| `R` | Reset cloth and apply the pending mesh and obstacle sizes |
+| `T` | Reset material values and pending mesh/object sizes to defaults |
+| `P` | Pause / resume simulation |
+
+Parameter meaning:
+
+- **Stretch stiffness** controls structural distance constraints.
+- **Shear stiffness** controls diagonal/shear distance constraints.
+- **Bend stiffness** controls dihedral bending constraints.
+- **Mesh resolution** changes particle, constraint, and contact count and is applied only when the cloth system is rebuilt on reset.
+- **Sphere radius** changes the smooth obstacle collision size.
+- **Cube size** changes the sharp analytic box collider and visual cube together.
+- **Iterations** control the number of PBD projection passes per timestep.
+- **Timestep** changes simulation speed and contact robustness; faster presets are less stable and are labeled in the overlay.
+
+The overlay shows the current material values, timestep, and currently applied obstacle sizes. If the pending mesh, sphere radius, or cube size differs from the current state, the overlay prints `Pending changes: press R to apply`.
 
 ### Wind Demo Controls
 

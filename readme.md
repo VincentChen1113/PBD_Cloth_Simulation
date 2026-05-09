@@ -166,6 +166,40 @@ Parameter meaning:
 
 The current hang-demo values are displayed in the on-screen overlay while the demo is running.
 
+### PBD Drop Controls
+
+The `pbd drop` demo includes an interactive tuning interface for sphere collision, material tuning, damping, and mesh-resolution comparison.
+
+Startup options:
+
+- `--radius value`: sets the sphere collider radius for the drop demo; accepts a float in `[0.1, 1.5]`
+- `--iters value`: sets the number of PBD projection passes per timestep for the drop demo; accepts an integer in `[1, 80]`
+
+Keyboard controls:
+
+| Key | Action |
+|---|---|
+| `1 / 2` | Decrease / increase stretch stiffness |
+| `3 / 4` | Decrease / increase shear stiffness |
+| `5 / 6` | Decrease / increase bend stiffness |
+| `7 / 8` | Decrease / increase damping factor |
+| `[` / `]` | Decrease / increase the pending mesh resolution by `2` |
+| `R` | Reset cloth and apply the pending mesh resolution |
+| `T` | Reset drop-demo tuning values to defaults and reset pending mesh resolution to `33` |
+| `P` | Pause / resume simulation |
+
+Parameter meaning:
+
+- **Sphere radius** changes the collision equation $C(p) = \lVert p - c \rVert - r \ge 0$.
+- **Stretch stiffness** controls structural distance constraints.
+- **Shear stiffness** controls diagonal/shear distance constraints.
+- **Bend stiffness** controls dihedral bending constraints.
+- **Damping** controls velocity energy decay.
+- **Iterations** control the number of PBD projection passes per timestep.
+- **Mesh resolution** changes particle and constraint count and is applied only when the cloth system is rebuilt on reset.
+
+The current and pending mesh resolutions are shown in the on-screen overlay. If the pending mesh differs from the current mesh, the overlay prints `Pending mesh: NxN, press R to apply`.
+
 ### Wind Demo Controls
 
 The `pbd hang-wind` demo configures the cloth like a flag:

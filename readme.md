@@ -1,7 +1,7 @@
 # PBD Cloth Simulation
 
 **Author Name:** Vincent Chen  
-**Course:** Stony Brook University — CSE 328: Computer Graphics (Spring 2026)
+**Course:** Stony Brook University — CSE 328: Computer Graphics
 **Name:** Hong Qin  
 
 

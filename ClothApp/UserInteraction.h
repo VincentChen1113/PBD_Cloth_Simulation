@@ -13,9 +13,6 @@ protected:
 	float* vbuff; // vertex buffer
 	FixedPointController* fixer; // point fixer
 	Renderer* renderer; // pick shader renderer
-	vec3 dragClampMin;
-	vec3 dragClampMax;
-	bool dragClampEnabled;
 	virtual int colorToIndex(color c) const = 0;
 
 public:
@@ -23,7 +20,6 @@ public:
 
 	void setModelview(const glm::mat4& mv);
 	void setProjection(const glm::mat4& p);
-	void setDragBounds(const vec3& minBounds, const vec3& maxBounds);
 
 	void grabPoint(int mouse_x, int mouse_y); // grab point with color c
 	void movePoint(vec3 v); // move grabbed point along mouse

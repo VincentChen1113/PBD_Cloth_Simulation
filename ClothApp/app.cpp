@@ -51,8 +51,6 @@ static const glm::vec4 g_shadow_color(0.0f, 0.0f, 0.0f, 0.32f);
 static const float g_floor_collision_height = -1.75f;
 static const float g_floor_render_offset = -0.002f;
 static const float g_floor_extent = 3.5f;
-static const float g_mouse_drag_tolerance_scale = 0.75f;
-static const float g_mouse_drag_tolerance_min = 0.6f;
 
 // Shader Handles
 static PhongShader* g_phongShader; // linked phong shader
@@ -94,6 +92,8 @@ enum class WindCliMode {
 
 static WindCliMode g_windCliMode = WindCliMode::None;
 static float g_windSpeed = 0.0f;
+static bool g_windDirectionCliProvided = false;
+static Eigen::Vector3f g_windDirection(1.0f, 0.0f, 0.0f);
 static unsigned int g_pbdHangIterationsOverride = 0u;
 static unsigned int g_pbdDropIterationsOverride = 0u;
 static unsigned int g_pbdFloorIterationsOverride = 0u;
@@ -263,6 +263,7 @@ namespace PBDWindCliParam {
 	static const float minValue = 0.0f; // Safe lower bound for user-provided --wind-speed.
 	static const float maxValue = 15.0f; // Safe upper bound for user-provided --wind-speed.
 	static const glm::vec3 windDirection(1.0f, 0.0f, 0.0f); // wind direction
+	static const float minDirectionNorm = 1e-4f;
 	static const float gustFraction = 0.30f; // Gust amplitude scale, used in A_gust = gustFraction * userWindValue.
 	static const float gustFrequency = 1.35f; // Gust frequency in u(t) = u_base + A_gust * sin(2 * pi * gustFrequency * t) + noise(t, x).
 	static const float noiseFraction = 0.08f; // Small procedural flutter scale added to u(t) after the sinusoidal gust term.
@@ -272,6 +273,16 @@ namespace PBDWindCliParam {
 	static const float dampingFactor = 0.06f; // Velocity damping for the wind demo to keep flutter stable.
 	static const float bendStiffness = 0.008f; // Softer bending stiffness so the flag can ripple under gusts.
 	static const float flagHeightOffset = 1.15f; // Vertical lift applied when rotating the cloth into the flag pose.
+}
+
+namespace PBDWindControlParam {
+	static const float speedMin = 0.0f;
+	static const float speedMax = 15.0f;
+	static const float speedStep = 0.5f;
+	static const float directionMin = -1.0f;
+	static const float directionMax = 1.0f;
+	static const float directionStep = 0.1f;
+	static const float verticalWarningThreshold = 0.35f;
 }
 
 struct PBDHangRuntimeState {
@@ -285,6 +296,17 @@ struct PBDHangRuntimeState {
 };
 
 static PBDHangRuntimeState g_pbdHangRuntime;
+
+struct PBDWindRuntimeState {
+	bool initialized = false;
+	bool paused = false;
+	float currentWindSpeed = 0.0f;
+	float startupWindSpeed = 0.0f;
+	Eigen::Vector3f currentDirectionInput = Eigen::Vector3f(1.0f, 0.0f, 0.0f);
+	Eigen::Vector3f appliedWindDirection = Eigen::Vector3f(1.0f, 0.0f, 0.0f);
+};
+
+static PBDWindRuntimeState g_pbdWindRuntime;
 
 struct PBDDropRuntimeState {
 	bool initialized = false;
@@ -357,10 +379,13 @@ static void initSphereColliderVisual(float radius, const glm::vec3& center); // 
 static void initCubeColliderVisual(const glm::vec3& center, const glm::vec3& halfExtents); // Generate cube collider mesh
 static void initScene(); // Generate scene matrices
 static void initMouseInteraction(FixedPointController*, unsigned int);
-static glm::vec3 dragClampTolerance();
 static void rebuildClothMesh(unsigned int resolution);
-static void configurePBDHangSolver(float stretch, float shear, float bend, float damping, unsigned int iterations, bool captureDefaults);
-static void resetPBDHangDemo(bool resetParameters);
+static Eigen::Vector3f normalizedWindDirectionOrFallback(const Eigen::Vector3f& direction, const Eigen::Vector3f& fallback, bool* usedFallback = nullptr);
+static PBDWindConfig makeWindConfig(float windSpeed, const Eigen::Vector3f& direction);
+static void configurePBDWindSolver(float windSpeed, const Eigen::Vector3f& directionInput, bool captureDefaults);
+static void applyPBDWindSettings(float windSpeed, const Eigen::Vector3f& directionInput);
+static void resetPBDWindDemo(bool resetParameters);
+static void logPBDWindControlState(const std::string& reason);
 static void logPBDHangControlState(const std::string& reason);
 static unsigned int previousPBDDropResolution(unsigned int resolution);
 static unsigned int nextPBDDropResolution(unsigned int resolution);
@@ -402,7 +427,9 @@ static void configurePBDDualSolver(
 static void resetPBDDualDemo(bool resetParameters);
 static void logPBDDualControlState(const std::string& reason);
 static void drawBitmapText(float x, float y, const std::string& text);
+static void drawWindDirectionIndicator(const Eigen::Vector3f& normalizedDirection);
 static void drawPBDHangOverlay();
+static void drawPBDWindOverlay();
 static void drawPBDDropOverlay();
 static void drawPBDFloorOverlay();
 static void drawPBDDualOverlay();
@@ -631,7 +658,7 @@ static void parseSimMode(int argc, char** argv) {
 	}
 
 	throw std::runtime_error(
-		"Usage: ./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug], ./fast-mass-spring pbd hang [--iters value] [--self-thickness value] [--debug], ./fast-mass-spring pbd hang-wind [--wind-speed value] [--self-thickness value] [--debug], ./fast-mass-spring pbd drop [--radius value] [--iters value] [--self-thickness value] [--debug], ./fast-mass-spring pbd drop-floor [--iters value] [--dt value] [--self-thickness value] [--debug], ./fast-mass-spring pbd drop-floor-dual [--iters value] [--self-thickness value] [--debug], or ./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang-wind|pbd-drop|pbd-drop-floor|pbd-drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value] [--iters value]"
+		"Usage: ./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug], ./fast-mass-spring pbd hang [--iters value] [--self-thickness value] [--debug], ./fast-mass-spring pbd hang-wind [--wind-speed value] [--wind-dir x y z] [--self-thickness value] [--debug], ./fast-mass-spring pbd drop [--radius value] [--iters value] [--self-thickness value] [--debug], ./fast-mass-spring pbd drop-floor [--iters value] [--dt value] [--self-thickness value] [--debug], ./fast-mass-spring pbd drop-floor-dual [--iters value] [--self-thickness value] [--debug], or ./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang-wind|pbd-drop|pbd-drop-floor|pbd-drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value] [--wind-dir x y z] [--iters value]"
 	);
 }
 
@@ -681,6 +708,40 @@ static void parseOptionalArgs(int argc, char** argv, int startIndex) {
 
 			g_windCliMode = WindCliMode::Speed;
 			g_windSpeed = windSpeed;
+			continue;
+		}
+
+		if (arg == "--wind-dir") {
+			if (g_mode != SimMode::PBDHangWind) {
+				throw std::runtime_error("--wind-dir is only valid for the pbd hang-wind demo");
+			}
+			if (i + 3 >= argc) {
+				throw std::runtime_error("--wind-dir expects three float values: x y z");
+			}
+			if (g_windDirectionCliProvided) {
+				throw std::runtime_error("Specify --wind-dir only once");
+			}
+
+			std::stringstream xStream(argv[++i]);
+			std::stringstream yStream(argv[++i]);
+			std::stringstream zStream(argv[++i]);
+			float x = 0.0f;
+			float y = 0.0f;
+			float z = 0.0f;
+			xStream >> x;
+			yStream >> y;
+			zStream >> z;
+			if (!xStream || !xStream.eof() || !yStream || !yStream.eof() || !zStream || !zStream.eof()) {
+				throw std::runtime_error("--wind-dir expects three float values: x y z");
+			}
+
+			const Eigen::Vector3f direction(x, y, z);
+			if (direction.norm() < PBDWindCliParam::minDirectionNorm) {
+				throw std::runtime_error("--wind-dir expects a non-zero vector");
+			}
+
+			g_windDirection = direction;
+			g_windDirectionCliProvided = true;
 			continue;
 		}
 
@@ -816,14 +877,6 @@ static unsigned int activeGridSize() {
 
 static float activeClothWidth() {
 	return isPBDMode() ? PBDSystemParam::w : SystemParam::w;
-}
-
-static glm::vec3 dragClampTolerance() {
-	const float tolerance = std::max(
-		g_mouse_drag_tolerance_min,
-		g_mouse_drag_tolerance_scale * activeClothWidth()
-	);
-	return glm::vec3(tolerance);
 }
 
 static void rebuildClothMesh(unsigned int resolution) {
@@ -1177,28 +1230,6 @@ static void initMouseInteraction(FixedPointController* mouseFixer, unsigned int 
 	g_pickShader->setTessFact(n);
 	UI = new GridMeshUI(g_pickRenderer, mouseFixer, g_clothMesh->vbuff(), n);
 
-	if (g_mode != SimMode::PBDHangWind) {
-		return;
-	}
-
-	float* const positions = g_clothMesh->vbuff();
-	const unsigned int vertexCount = g_clothMesh->n_vertices();
-	if (positions != nullptr && vertexCount > 0u) {
-		glm::vec3 minBounds(positions[0], positions[1], positions[2]);
-		glm::vec3 maxBounds = minBounds;
-		for (unsigned int vertex = 1u; vertex < vertexCount; ++vertex) {
-			const glm::vec3 position(
-				positions[3 * vertex + 0],
-				positions[3 * vertex + 1],
-				positions[3 * vertex + 2]
-			);
-			minBounds = glm::min(minBounds, position);
-			maxBounds = glm::max(maxBounds, position);
-		}
-
-		const glm::vec3 tolerance = dragClampTolerance();
-		UI->setDragBounds(minBounds - tolerance, maxBounds + tolerance);
-	}
 }
 
 static void configurePBDHangSolver(
@@ -1313,6 +1344,152 @@ static void logPBDHangControlState(const std::string& reason) {
 		<< ", damping=" << g_pbdSolver->getDampingFactor()
 		<< ", iters=" << g_pbdSolver->getSolverIterations()
 		<< (g_pbdHangRuntime.paused ? ", paused" : ", running")
+		<< std::endl;
+}
+
+static Eigen::Vector3f normalizedWindDirectionOrFallback(const Eigen::Vector3f& direction, const Eigen::Vector3f& fallback, bool* usedFallback) {
+	const float norm = direction.norm();
+	if (norm < PBDWindCliParam::minDirectionNorm) {
+		if (usedFallback != nullptr) {
+			*usedFallback = true;
+		}
+		const float fallbackNorm = fallback.norm();
+		if (fallbackNorm < PBDWindCliParam::minDirectionNorm) {
+			return Eigen::Vector3f(1.0f, 0.0f, 0.0f);
+		}
+		return fallback / fallbackNorm;
+	}
+	if (usedFallback != nullptr) {
+		*usedFallback = false;
+	}
+	return direction / norm;
+}
+
+static PBDWindConfig makeWindConfig(float windSpeed, const Eigen::Vector3f& direction) {
+	PBDWindConfig windConfig;
+	windConfig.inputMode = PBDWindInputMode::Speed;
+	// Wind direction controls the direction of the applied aerodynamic force and
+	// is normalized before it is given to the solver.
+	windConfig.windDirection = normalizedWindDirectionOrFallback(direction, Eigen::Vector3f(1.0f, 0.0f, 0.0f), nullptr);
+	// Wind speed controls the magnitude of the external wind velocity and is
+	// clamped to [0, 15] for stability.
+	windConfig.baseSpeed = std::max(PBDWindControlParam::speedMin, std::min(PBDWindControlParam::speedMax, windSpeed));
+	windConfig.baseAcceleration = 0.0f;
+	const float gustReference = windConfig.baseSpeed;
+	// Drag, lift, gust, and noise remain internal defaults to keep the demo simple.
+	windConfig.gustAmplitude = PBDWindCliParam::gustFraction * gustReference;
+	windConfig.gustFrequency = PBDWindCliParam::gustFrequency;
+	windConfig.noiseStrength = PBDWindCliParam::noiseFraction * gustReference;
+	windConfig.dragCoefficient = PBDWindCliParam::dragCoefficient;
+	windConfig.liftCoefficient = PBDWindCliParam::liftCoefficient;
+	windConfig.airDensity = PBDWindCliParam::airDensity;
+	windConfig.maxWindSpeed = PBDWindCliParam::maxValue;
+	return windConfig;
+}
+
+static void applyPBDWindSettings(float windSpeed, const Eigen::Vector3f& directionInput) {
+	if (g_pbdSolver == nullptr) return;
+
+	const float clampedSpeed = std::max(PBDWindControlParam::speedMin, std::min(PBDWindControlParam::speedMax, windSpeed));
+	const Eigen::Vector3f normalizedDirection = normalizedWindDirectionOrFallback(
+		directionInput,
+		g_pbdWindRuntime.appliedWindDirection,
+		nullptr
+	);
+	g_pbdSolver->setWindConfig(makeWindConfig(clampedSpeed, directionInput));
+	g_pbdWindRuntime.currentWindSpeed = clampedSpeed;
+	g_pbdWindRuntime.currentDirectionInput = directionInput;
+	g_pbdWindRuntime.appliedWindDirection = normalizedDirection;
+}
+
+static void configurePBDWindSolver(float windSpeed, const Eigen::Vector3f& directionInput, bool captureDefaults) {
+	const unsigned int n = PBDSystemParam::n;
+	const Eigen::Vector3f floorPoint(0.0f, 0.0f, g_floor_collision_height);
+	const Eigen::Vector3f floorNormal(0.0f, 0.0f, 1.0f);
+
+	if (UI != nullptr) {
+		UI->releasePoint();
+	}
+
+	delete g_pbdSolver;
+	g_pbdSolver = nullptr;
+	delete g_pbdSystem;
+	g_pbdSystem = nullptr;
+
+	orientClothForWindFlag();
+
+	MassSpringBuilder builder;
+	builder.uniformGrid(
+		PBDSystemParam::n,
+		PBDSystemParam::h,
+		PBDSystemParam::r,
+		1.0f,
+		PBDSystemParam::m,
+		PBDSystemParam::a,
+		PBDSystemParam::g
+	);
+
+	mass_spring_system* temp = builder.getResult();
+	g_pbdSystem = buildPBDSystem(*temp);
+	delete temp;
+	g_pbdSolver = new PBDSolver(g_pbdSystem, g_clothMesh->vbuff());
+	if (g_selfCollisionThicknessOverride > 0.0f) {
+		g_pbdSolver->setSelfCollisionThickness(g_selfCollisionThicknessOverride);
+	}
+
+	applyPBDWindSettings(windSpeed, directionInput);
+	g_pbdSolver->setDampingFactor(PBDWindCliParam::dampingFactor);
+	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), PBDSystemParam::k_stretch);
+	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
+	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDWindCliParam::bendStiffness);
+	g_pbdSolver->addPlaneCollider(floorPoint, floorNormal);
+	for (unsigned int row = 0; row < n; ++row) {
+		g_pbdSolver->pinPoint(row * n);
+	}
+
+	g_pbdFrameCounter = 0u;
+	initMouseInteraction(g_pbdSolver, n);
+
+	if (captureDefaults || !g_pbdWindRuntime.initialized) {
+		g_pbdWindRuntime.startupWindSpeed = g_pbdWindRuntime.currentWindSpeed;
+		g_pbdWindRuntime.initialized = true;
+	}
+}
+
+static void resetPBDWindDemo(bool resetParameters) {
+	if (g_mode != SimMode::PBDHangWind || g_pbdSolver == nullptr || !g_pbdWindRuntime.initialized) return;
+
+	if (resetParameters) {
+		applyPBDWindSettings(
+			g_pbdWindRuntime.startupWindSpeed,
+			Eigen::Vector3f(PBDWindCliParam::windDirection.x, PBDWindCliParam::windDirection.y, PBDWindCliParam::windDirection.z)
+		);
+		logPBDWindControlState("reset-parameters");
+		glutPostRedisplay();
+		return;
+	}
+
+	g_mouseClickDown = false;
+	g_mouseLClickButton = false;
+	g_mouseRClickButton = false;
+	g_mouseMClickButton = false;
+
+	configurePBDWindSolver(g_pbdWindRuntime.currentWindSpeed, g_pbdWindRuntime.currentDirectionInput, false);
+	logPBDWindControlState("reset-cloth");
+	glutPostRedisplay();
+}
+
+static void logPBDWindControlState(const std::string& reason) {
+	if (g_mode != SimMode::PBDHangWind || g_pbdSolver == nullptr) return;
+	const Eigen::Vector3f& rawDirection = g_pbdWindRuntime.currentDirectionInput;
+	const Eigen::Vector3f& normalizedDirection = g_pbdWindRuntime.appliedWindDirection;
+	std::cout
+		<< "[pbd wind controls] " << reason
+		<< " speed=" << g_pbdWindRuntime.currentWindSpeed
+		<< " range=[0, 15]"
+		<< ", direction=(" << rawDirection.x() << ", " << rawDirection.y() << ", " << rawDirection.z() << ")"
+		<< ", normalized=(" << normalizedDirection.x() << ", " << normalizedDirection.y() << ", " << normalizedDirection.z() << ")"
+		<< (g_pbdWindRuntime.paused ? ", paused" : ", running")
 		<< std::endl;
 }
 
@@ -2053,71 +2230,8 @@ static void demo_pbd_hang() {
 }
 
 static void demo_pbd_hang_wind() {
-	const unsigned int n = PBDSystemParam::n;
-	const Eigen::Vector3f floorPoint(0.0f, 0.0f, g_floor_collision_height);
-	const Eigen::Vector3f floorNormal(0.0f, 0.0f, 1.0f);
-	orientClothForWindFlag();
-
-	MassSpringBuilder builder;
-	builder.uniformGrid(
-		PBDSystemParam::n,
-		PBDSystemParam::h,
-		PBDSystemParam::r,
-		1.0f,
-		PBDSystemParam::m,
-		PBDSystemParam::a,
-		PBDSystemParam::g
-	);
-
-	mass_spring_system* temp = builder.getResult();
-	g_pbdSystem = buildPBDSystem(*temp);
-	delete temp;
-	g_pbdSolver = new PBDSolver(g_pbdSystem, g_clothMesh->vbuff());
-	if (g_selfCollisionThicknessOverride > 0.0f) {
-		g_pbdSolver->setSelfCollisionThickness(g_selfCollisionThicknessOverride);
-	}
-	PBDWindConfig windConfig;
-	windConfig.inputMode = PBDWindInputMode::Speed;
-	windConfig.windDirection = Eigen::Vector3f(
-		PBDWindCliParam::windDirection.x,
-		PBDWindCliParam::windDirection.y,
-		PBDWindCliParam::windDirection.z
-	);
-	windConfig.baseSpeed = g_windSpeed;
-	windConfig.baseAcceleration = 0.0f;
-	const float gustReference = g_windSpeed;
-	windConfig.gustAmplitude = PBDWindCliParam::gustFraction * gustReference;
-	windConfig.gustFrequency = PBDWindCliParam::gustFrequency;
-	windConfig.noiseStrength = PBDWindCliParam::noiseFraction * gustReference;
-	windConfig.dragCoefficient = PBDWindCliParam::dragCoefficient;
-	windConfig.liftCoefficient = PBDWindCliParam::liftCoefficient;
-	windConfig.airDensity = PBDWindCliParam::airDensity;
-	windConfig.maxWindSpeed = PBDWindCliParam::maxValue;
-	g_pbdSolver->setWindConfig(windConfig);
-	g_pbdSolver->setDampingFactor(PBDWindCliParam::dampingFactor);
-	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), PBDSystemParam::k_stretch);
-	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
-	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDWindCliParam::bendStiffness);
-	g_pbdSolver->addPlaneCollider(floorPoint, floorNormal);
-	for (unsigned int row = 0; row < n; ++row) {
-		g_pbdSolver->pinPoint(row * n);
-	}
-	std::cout
-		<< "[pbd hang-wind] "
-		<< "wind-speed="
-		<< g_windSpeed
-		<< ", direction=(" << PBDWindCliParam::windDirection.x << ", "
-		<< PBDWindCliParam::windDirection.y << ", "
-		<< PBDWindCliParam::windDirection.z << ")"
-		<< ", gust-amplitude=" << windConfig.gustAmplitude
-		<< ", gust-frequency=" << windConfig.gustFrequency
-		<< ", noise-strength=" << windConfig.noiseStrength
-		<< ", Cd=" << windConfig.dragCoefficient
-		<< ", Cl=" << windConfig.liftCoefficient
-		<< ", rho=" << windConfig.airDensity
-		<< std::endl;
-	g_pbdFrameCounter = 0u;
-	initMouseInteraction(g_pbdSolver, n);
+	configurePBDWindSolver(g_windSpeed, g_windDirection, true);
+	logPBDWindControlState("startup");
 }
 
 static void demo_pbd_drop() {
@@ -2215,6 +2329,7 @@ static void display() {
 	}
 	drawCloth();
 	drawPBDHangOverlay();
+	drawPBDWindOverlay();
 	drawPBDDropOverlay();
 	drawPBDFloorOverlay();
 	drawPBDDualOverlay();
@@ -2233,6 +2348,97 @@ static void reshape(int w, int h) {
 
 static void keyboard(unsigned char key, int, int) {
 	if (g_pbdSolver == nullptr) return;
+
+	if (g_mode == SimMode::PBDHangWind) {
+		switch (key) {
+		case '1':
+			applyPBDWindSettings(
+				g_pbdWindRuntime.currentWindSpeed - PBDWindControlParam::speedStep,
+				g_pbdWindRuntime.currentDirectionInput
+			);
+			logPBDWindControlState("speed-");
+			break;
+		case '2':
+			applyPBDWindSettings(
+				g_pbdWindRuntime.currentWindSpeed + PBDWindControlParam::speedStep,
+				g_pbdWindRuntime.currentDirectionInput
+			);
+			logPBDWindControlState("speed+");
+			break;
+		case '3': {
+			Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
+			direction.x() = std::max(PBDWindControlParam::directionMin, direction.x() - PBDWindControlParam::directionStep);
+			if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
+				applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
+			}
+			logPBDWindControlState("dir-x-");
+			break;
+		}
+		case '4': {
+			Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
+			direction.x() = std::min(PBDWindControlParam::directionMax, direction.x() + PBDWindControlParam::directionStep);
+			if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
+				applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
+			}
+			logPBDWindControlState("dir-x+");
+			break;
+		}
+		case '5': {
+			Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
+			direction.y() = std::max(PBDWindControlParam::directionMin, direction.y() - PBDWindControlParam::directionStep);
+			if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
+				applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
+			}
+			logPBDWindControlState("dir-y-");
+			break;
+		}
+		case '6': {
+			Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
+			direction.y() = std::min(PBDWindControlParam::directionMax, direction.y() + PBDWindControlParam::directionStep);
+			if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
+				applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
+			}
+			logPBDWindControlState("dir-y+");
+			break;
+		}
+		case '7': {
+			Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
+			direction.z() = std::max(PBDWindControlParam::directionMin, direction.z() - PBDWindControlParam::directionStep);
+			if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
+				applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
+			}
+			logPBDWindControlState("dir-z-");
+			break;
+		}
+		case '8': {
+			Eigen::Vector3f direction = g_pbdWindRuntime.currentDirectionInput;
+			direction.z() = std::min(PBDWindControlParam::directionMax, direction.z() + PBDWindControlParam::directionStep);
+			if (direction.norm() >= PBDWindCliParam::minDirectionNorm) {
+				applyPBDWindSettings(g_pbdWindRuntime.currentWindSpeed, direction);
+			}
+			logPBDWindControlState("dir-z+");
+			break;
+		}
+		case 'r':
+		case 'R':
+			resetPBDWindDemo(false);
+			break;
+		case 't':
+		case 'T':
+			resetPBDWindDemo(true);
+			break;
+		case 'p':
+		case 'P':
+			g_pbdWindRuntime.paused = !g_pbdWindRuntime.paused;
+			logPBDWindControlState(g_pbdWindRuntime.paused ? "pause" : "resume");
+			break;
+		default:
+			return;
+		}
+
+		glutPostRedisplay();
+		return;
+	}
 
 	if (g_mode == SimMode::PBDHang) {
 		switch (key) {
@@ -2795,6 +3001,89 @@ static void drawBitmapText(float x, float y, const std::string& text) {
 	}
 }
 
+static void drawWindDirectionIndicator(const Eigen::Vector3f& normalizedDirection) {
+	glm::vec2 horizontalDirection(normalizedDirection.x(), normalizedDirection.y());
+	const float horizontalMagnitude = glm::length(horizontalDirection);
+
+	const glm::vec2 boxMin(18.0f, 18.0f);
+	const glm::vec2 boxMax(130.0f, 130.0f);
+	const glm::vec2 center = 0.5f * (boxMin + boxMax);
+	const float shaftLength = 34.0f;
+	const float headLength = 12.0f;
+	const float headWidth = 7.0f;
+	if (horizontalMagnitude > 1e-5f) {
+		horizontalDirection /= horizontalMagnitude;
+	}
+	const glm::vec2 tip = center + shaftLength * horizontalDirection;
+	const glm::vec2 headBase = tip - headLength * horizontalDirection;
+	const glm::vec2 normal(-horizontalDirection.y, horizontalDirection.x);
+
+	const glm::vec2 verticalAnchor(boxMax.x + 26.0f, center.y);
+	const float zMagnitude = std::min(1.0f, std::abs(normalizedDirection.z()));
+	const float verticalShaftLength = 18.0f + 18.0f * zMagnitude;
+	const float verticalHeadLength = 10.0f;
+	const float verticalHeadWidth = 6.0f;
+	const float verticalSign = (normalizedDirection.z() >= 0.0f) ? 1.0f : -1.0f;
+	const glm::vec2 verticalDirection(0.0f, verticalSign);
+	const glm::vec2 verticalTip = verticalAnchor + verticalShaftLength * verticalDirection;
+	const glm::vec2 verticalHeadBase = verticalTip - verticalHeadLength * verticalDirection;
+
+	glColor3f(0.72f, 0.78f, 0.88f);
+	glLineWidth(1.5f);
+	glBegin(GL_LINE_LOOP);
+	glVertex2f(boxMin.x, boxMin.y);
+	glVertex2f(boxMax.x, boxMin.y);
+	glVertex2f(boxMax.x, boxMax.y);
+	glVertex2f(boxMin.x, boxMax.y);
+	glEnd();
+
+	glBegin(GL_LINES);
+	glVertex2f(center.x - 5.0f, center.y);
+	glVertex2f(center.x + 5.0f, center.y);
+	glVertex2f(center.x, center.y - 5.0f);
+	glVertex2f(center.x, center.y + 5.0f);
+	glEnd();
+
+	glColor3f(0.95f, 0.97f, 1.0f);
+	if (horizontalMagnitude > 1e-5f) {
+		glLineWidth(2.5f);
+		glBegin(GL_LINES);
+		glVertex2f(center.x, center.y);
+		glVertex2f(tip.x, tip.y);
+		glEnd();
+
+		glBegin(GL_TRIANGLES);
+		glVertex2f(tip.x, tip.y);
+		glVertex2f(headBase.x + headWidth * normal.x, headBase.y + headWidth * normal.y);
+		glVertex2f(headBase.x - headWidth * normal.x, headBase.y - headWidth * normal.y);
+		glEnd();
+	}
+
+	glLineWidth(1.5f);
+	glBegin(GL_LINES);
+	glVertex2f(verticalAnchor.x, boxMin.y);
+	glVertex2f(verticalAnchor.x, boxMax.y);
+	glEnd();
+
+	if (zMagnitude > 1e-5f) {
+		glLineWidth(2.5f);
+		glBegin(GL_LINES);
+		glVertex2f(verticalAnchor.x, verticalAnchor.y);
+		glVertex2f(verticalTip.x, verticalTip.y);
+		glEnd();
+
+		glBegin(GL_TRIANGLES);
+		glVertex2f(verticalTip.x, verticalTip.y);
+		glVertex2f(verticalHeadBase.x + verticalHeadWidth, verticalHeadBase.y);
+		glVertex2f(verticalHeadBase.x - verticalHeadWidth, verticalHeadBase.y);
+		glEnd();
+	}
+
+	glLineWidth(1.0f);
+	drawBitmapText(boxMin.x + 30.0f, boxMin.y - 14.0f, "Wind");
+	drawBitmapText(verticalAnchor.x - 7.0f, boxMin.y - 14.0f, "Z");
+}
+
 static void drawPBDHangOverlay() {
 	if (g_mode != SimMode::PBDHang || g_pbdSolver == nullptr) return;
 
@@ -2825,6 +3114,54 @@ static void drawPBDHangOverlay() {
 	drawBitmapText(16.0f, g_windowHeight - 22.0f, "PBD hang tuning: 1/2 stretch  3/4 shear  5/6 bend  7/8 damping  R reset cloth  T reset params  P pause");
 	drawBitmapText(16.0f, g_windowHeight - 40.0f, valueLine.str());
 	drawBitmapText(16.0f, g_windowHeight - 58.0f, iterLine.str());
+
+	glPopMatrix();
+	glMatrixMode(GL_PROJECTION);
+	glPopMatrix();
+	glMatrixMode(GL_MODELVIEW);
+
+	if (depthEnabled) {
+		glEnable(GL_DEPTH_TEST);
+	}
+}
+
+static void drawPBDWindOverlay() {
+	if (g_mode != SimMode::PBDHangWind || g_pbdSolver == nullptr) return;
+
+	const GLboolean depthEnabled = glIsEnabled(GL_DEPTH_TEST);
+	glDisable(GL_DEPTH_TEST);
+
+	glMatrixMode(GL_PROJECTION);
+	glPushMatrix();
+	glLoadIdentity();
+	gluOrtho2D(0.0, static_cast<double>(g_windowWidth), 0.0, static_cast<double>(g_windowHeight));
+
+	glMatrixMode(GL_MODELVIEW);
+	glPushMatrix();
+	glLoadIdentity();
+	glColor3f(1.0f, 1.0f, 1.0f);
+
+	const Eigen::Vector3f& rawDirection = g_pbdWindRuntime.currentDirectionInput;
+	const Eigen::Vector3f& normalizedDirection = g_pbdWindRuntime.appliedWindDirection;
+	std::ostringstream line1;
+	line1 << std::fixed << std::setprecision(3)
+		<< "PBD Wind Demo"
+		<< "  speed=" << g_pbdWindRuntime.currentWindSpeed
+		<< "  range=[0, 15]"
+		<< "  state=" << (g_pbdWindRuntime.paused ? "paused" : "running");
+
+	std::ostringstream line2;
+	line2 << std::fixed << std::setprecision(3)
+		<< "dir=(" << rawDirection.x() << ", " << rawDirection.y() << ", " << rawDirection.z() << ")"
+		<< "  normalized=(" << normalizedDirection.x() << ", " << normalizedDirection.y() << ", " << normalizedDirection.z() << ")";
+
+	drawBitmapText(16.0f, g_windowHeight - 22.0f, "Controls: 1/2 speed  3/4 dir-x  5/6 dir-y  7/8 dir-z  R reset cloth  T reset wind  P pause");
+	drawBitmapText(16.0f, g_windowHeight - 40.0f, line1.str());
+	drawBitmapText(16.0f, g_windowHeight - 58.0f, line2.str());
+	drawWindDirectionIndicator(normalizedDirection);
+	if (std::abs(normalizedDirection.z()) > PBDWindControlParam::verticalWarningThreshold) {
+		drawBitmapText(16.0f, g_windowHeight - 76.0f, "Warning: wind has a vertical component. For flag-style motion, use z near 0.");
+	}
 
 	glPopMatrix();
 	glMatrixMode(GL_PROJECTION);
@@ -3032,6 +3369,7 @@ static void drawPBDDualOverlay() {
 static void animateCloth(int value) {
 	if (isPBDMode()) {
 		const bool paused = (g_mode == SimMode::PBDHang && g_pbdHangRuntime.paused)
+			|| (g_mode == SimMode::PBDHangWind && g_pbdWindRuntime.paused)
 			|| (g_mode == SimMode::PBDDrop && g_pbdDropRuntime.paused)
 			|| (g_mode == SimMode::PBDDropFloor && g_pbdFloorRuntime.paused)
 			|| (g_mode == SimMode::PBDDropFloorDual && g_pbdDualRuntime.paused);

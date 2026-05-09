@@ -96,13 +96,13 @@ Long-form mode selection:
 
 ```bash
 ./fast-mass-spring [mass-spring|ms] [hang|drop] [--self-thickness value] [--debug]
-./fast-mass-spring pbd [hang|hang-wind|drop|drop-floor|drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value] [--iters value] [--radius value] [--dt value]
+./fast-mass-spring pbd [hang|hang-wind|drop|drop-floor|drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value] [--wind-dir x y z] [--iters value] [--radius value] [--dt value]
 ```
 
 Short-form mode selection:
 
 ```bash
-./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang-wind|pbd-drop|pbd-drop-floor|pbd-drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value] [--iters value] [--radius value] [--dt value]
+./fast-mass-spring [ms-hang|ms-drop|pbd-hang|pbd-hang-wind|pbd-drop|pbd-drop-floor|pbd-drop-floor-dual] [--self-thickness value] [--debug] [--wind-speed value] [--wind-dir x y z] [--iters value] [--radius value] [--dt value]
 ```
 
 ### Demo Modes
@@ -115,7 +115,7 @@ Short-form mode selection:
 | PBD drop | `./fast-mass-spring pbd drop` | PBD cloth dropping onto a sphere |
 | PBD drop-floor | `./fast-mass-spring pbd drop-floor --iters 28 --dt 0.003` | Floor contact and self-collision stress test |
 | PBD drop-floor-dual | `./fast-mass-spring pbd drop-floor-dual --iters 28` | Cloth interaction with sphere and box obstacles |
-| PBD hang-wind | `./fast-mass-spring pbd hang-wind --wind-speed 5` | Flag-style wind demo |
+| PBD hang-wind | `./fast-mass-spring pbd hang-wind --wind-speed 5 --wind-dir 1 0 0` | Flag-style wind demo |
 
 ### Example Commands
 
@@ -130,7 +130,7 @@ Short-form mode selection:
 ./fast-mass-spring pbd drop-floor --self-thickness 0.02
 ./fast-mass-spring pbd drop-floor-dual
 ./fast-mass-spring pbd drop-floor-dual --iters 28
-./fast-mass-spring pbd hang-wind --wind-speed 5
+./fast-mass-spring pbd hang-wind --wind-speed 5 --wind-dir 1 0 0
 ./fast-mass-spring pbd-hang-wind --wind-speed 8
 ```
 
@@ -283,15 +283,32 @@ The overlay shows the current material values, timestep, and currently applied o
 The `pbd hang-wind` demo configures the cloth like a flag:
 
 - one side edge is pinned like cloth attached to a pole
-- wind blows horizontally, perpendicular to gravity
 - aerodynamic forcing uses triangle-based drag and lift
-- gust and noise terms modulate the base wind speed over time
+- drag, lift, gust, and noise stay as internal defaults so the interface stays focused on wind input only
 
-Required startup option:
+Startup options:
 
 - `--wind-speed value`: required for `pbd hang-wind`; accepts a float in `[0, 15]`
+- `--wind-dir x y z`: optional startup wind direction; defaults to `(1, 0, 0)` and is normalized internally
 
-The wind speed is the base horizontal wind speed used by the drag/lift/gust model.
+Keyboard controls:
+
+| Key | Action |
+|---|---|
+| `1 / 2` | Decrease / increase wind speed |
+| `3 / 4` | Decrease / increase wind direction x |
+| `5 / 6` | Decrease / increase wind direction y |
+| `7 / 8` | Decrease / increase wind direction z |
+| `R` | Reset the cloth while keeping the current wind values |
+| `T` | Reset wind values to defaults |
+| `P` | Pause / resume simulation |
+
+Parameter meaning:
+
+- **Wind speed** controls the magnitude of the external wind velocity and is clamped to `[0, 15]`.
+- **Wind direction** controls the direction of the applied aerodynamic force and is normalized before use.
+
+The overlay shows the current wind speed, the valid speed range, the current direction components, the normalized applied direction, and pause state. It also includes a framed lower-left wind widget: the boxed arrow shows the normalized horizontal `x/y` direction, and a separate `Z` arrow on the right shows whether the normalized vertical component points upward or downward. If the normalized wind direction has a large vertical component, the overlay warns that `z` should stay near `0` for flag-style motion.
 
 ### Debug Flags
 

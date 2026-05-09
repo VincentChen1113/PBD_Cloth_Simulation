@@ -4,17 +4,10 @@
 #include <cmath>
 
 UserInteraction::UserInteraction(Renderer* renderer, FixedPointController* fixer, float* vbuff) 
-	: renderer(renderer), vbuff(vbuff), fixer(fixer), i(-1),
-	  dragClampMin(0.0f), dragClampMax(0.0f), dragClampEnabled(false) {}
+	: renderer(renderer), vbuff(vbuff), fixer(fixer), i(-1) {}
 
 void UserInteraction::setModelview(const glm::mat4& mv) { renderer->setModelview(mv); }
 void UserInteraction::setProjection(const glm::mat4& p) { renderer->setProjection(p); }
-
-void UserInteraction::setDragBounds(const vec3& minBounds, const vec3& maxBounds) {
-	dragClampMin = minBounds;
-	dragClampMax = maxBounds;
-	dragClampEnabled = true;
-}
 
 void UserInteraction::grabPoint(int mouse_x, int mouse_y){
 	// render scene
@@ -44,9 +37,6 @@ void UserInteraction::movePoint(vec3 v) {
 		vbuff[3 * i + 1] + v[1],
 		vbuff[3 * i + 2] + v[2]
 	);
-	if (dragClampEnabled) {
-		target = glm::clamp(target, dragClampMin, dragClampMax);
-	}
 	for(int j = 0; j < 3; j++) {
 		vbuff[3 * i + j] = target[j];
 	}

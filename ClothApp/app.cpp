@@ -3,6 +3,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>
+#include <iomanip>
 #include <stdexcept>
 #include <iostream>
 #include <string>
@@ -92,6 +93,7 @@ enum class WindCliMode {
 
 static WindCliMode g_windCliMode = WindCliMode::None;
 static float g_windSpeed = 0.0f;
+static unsigned int g_pbdHangIterationsOverride = 0u;
 
 // Constraint Graph
 static CgRootNode* g_cgRootNode;
@@ -128,8 +130,8 @@ namespace PBDSystemParam {
 	static const int n_iter = 20; // solver iterations | 15
 	static const float a = 0.02f; // damping factor
 	static const float eps = 1e-4f; // collision epsilon
-	static const float k_stretch = 0.9f; // stretch stiffness | 1.0f
-	static const float k_shear = 0.9f; // shear stiffness | 0.8f
+	static const float k_stretch = 0.9f; // stretch stiffness | 0.9f
+	static const float k_shear = 0.8f; // shear stiffness | 0.8f
 	static const float k_bend = 0.01f; // bend stiffness | 0.01f
 	static const float sphere_radius = 0.64f;  // radius of sphere collider in drop demo | 0.64f
 }
@@ -143,6 +145,27 @@ namespace PBDFloorDemoParam {
 
 namespace PBDDebugParam {
 	static const unsigned int debugPrintPeriod = 20u;
+}
+
+namespace PBDHangCliParam {
+	static const unsigned int minIterations = 1u;
+	static const unsigned int maxIterations = 80u;
+}
+
+namespace PBDHangControlParam {
+	static const float stretchMin = 0.0f;
+	static const float stretchMax = 1.0f;
+	static const float shearMin = 0.0f;
+	static const float shearMax = 1.0f;
+	static const float bendMin = 0.0f;
+	static const float bendMax = 0.10f;
+	static const float dampingMin = 0.0f;
+	static const float dampingMax = 0.20f;
+	static const float stretchStep = 0.05f;
+	static const float shearStep = 0.05f;
+	static const float bendStep = 0.005f;
+	static const float dampingStep = 0.01f;
+	static const float defaultDamping = 0.07f;
 }
 
 namespace PBDWindCliParam {
@@ -159,6 +182,19 @@ namespace PBDWindCliParam {
 	static const float bendStiffness = 0.008f; // Softer bending stiffness so the flag can ripple under gusts.
 	static const float flagHeightOffset = 1.15f; // Vertical lift applied when rotating the cloth into the flag pose.
 }
+
+struct PBDHangRuntimeState {
+	bool initialized = false;
+	bool paused = false;
+	float defaultStretch = PBDSystemParam::k_stretch;
+	float defaultShear = PBDSystemParam::k_shear;
+	float defaultBend = PBDSystemParam::k_bend;
+	float defaultDamping = PBDHangControlParam::defaultDamping;
+	std::vector<float> initialPositions;
+};
+
+static PBDHangRuntimeState g_pbdHangRuntime;
+
 // F U N C T I O N S //////////////////////////////////////////////////////////////
 // state initialization
 static void initGlutState(int, char**);
@@ -175,6 +211,11 @@ static void initCubeColliderVisual(const glm::vec3& center, const glm::vec3& hal
 static void initScene(); // Generate scene matrices
 static void initMouseInteraction(FixedPointController*, unsigned int);
 static glm::vec3 dragClampTolerance();
+static void configurePBDHangSolver(float stretch, float shear, float bend, float damping, unsigned int iterations, bool captureDefaults);
+static void resetPBDHangDemo(bool resetParameters);
+static void logPBDHangControlState(const std::string& reason);
+static void drawBitmapText(float x, float y, const std::string& text);
+static void drawPBDHangOverlay();
 static glm::mat4 floorShadowMatrix(float planeHeight, const glm::vec3& lightDirection);
 static void orientClothForFloorDrop();
 static void orientClothFlatForDualFloorDrop();
@@ -268,6 +309,7 @@ static void selectDemo() {
 // glut callbacks
 static void display();
 static void reshape(int, int);
+static void keyboard(unsigned char, int, int);
 static void mouse(int, int, int, int);
 static void motion(int, int);
 
@@ -452,6 +494,32 @@ static void parseOptionalArgs(int argc, char** argv, int startIndex) {
 			continue;
 		}
 
+		if (arg == "--iters") {
+			if (g_mode != SimMode::PBDHang) {
+				throw std::runtime_error("--iters is only valid for the pbd hang demo");
+			}
+			if (i + 1 >= argc) {
+				throw std::runtime_error("Missing value after --iters");
+			}
+			if (g_pbdHangIterationsOverride != 0u) {
+				throw std::runtime_error("Specify --iters only once");
+			}
+
+			std::stringstream valueStream(argv[++i]);
+			int iterations = 0;
+			valueStream >> iterations;
+			// --iters controls the number of PBD projection passes per timestep
+			// for the hang demo only, so keep it within a safe startup range.
+			if (!valueStream || !valueStream.eof()
+				|| iterations < static_cast<int>(PBDHangCliParam::minIterations)
+				|| iterations > static_cast<int>(PBDHangCliParam::maxIterations)) {
+				throw std::runtime_error("--iters expects an integer value in [1, 80]");
+			}
+
+			g_pbdHangIterationsOverride = static_cast<unsigned int>(iterations);
+			continue;
+		}
+
 		throw std::runtime_error("Unknown argument: " + arg);
 	}
 }
@@ -470,6 +538,7 @@ static void initGlutState(int argc, char** argv) {
 
 	glutDisplayFunc(display);
 	glutReshapeFunc(reshape);
+	glutKeyboardFunc(keyboard);
 	glutMouseFunc(mouse);
 	glutMotionFunc(motion);
 }
@@ -830,12 +899,24 @@ static void orientClothForWindFlag() {
 }
 
 static void initMouseInteraction(FixedPointController* mouseFixer, unsigned int n) {
+	if (UI != nullptr) {
+		UI->releasePoint();
+		delete UI;
+		UI = nullptr;
+	}
+	delete g_pickRenderer;
+	g_pickRenderer = nullptr;
+
 	g_pickRenderer = new Renderer();
 	g_pickRenderer->setProgram(g_pickShader);
 	g_pickRenderer->setProgramInput(g_render_target);
 	g_pickRenderer->setElementCount(g_clothMesh->ibuffLen());
 	g_pickShader->setTessFact(n);
 	UI = new GridMeshUI(g_pickRenderer, mouseFixer, g_clothMesh->vbuff(), n);
+
+	if (g_mode != SimMode::PBDHangWind) {
+		return;
+	}
 
 	float* const positions = g_clothMesh->vbuff();
 	const unsigned int vertexCount = g_clothMesh->n_vertices();
@@ -855,6 +936,121 @@ static void initMouseInteraction(FixedPointController* mouseFixer, unsigned int 
 		const glm::vec3 tolerance = dragClampTolerance();
 		UI->setDragBounds(minBounds - tolerance, maxBounds + tolerance);
 	}
+}
+
+static void configurePBDHangSolver(
+	float stretch,
+	float shear,
+	float bend,
+	float damping,
+	unsigned int iterations,
+	bool captureDefaults
+) {
+	const unsigned int n = PBDSystemParam::n;
+
+	delete g_pbdSolver;
+	g_pbdSolver = nullptr;
+	delete g_pbdSystem;
+	g_pbdSystem = nullptr;
+
+	MassSpringBuilder builder;
+	builder.uniformGrid(
+		PBDSystemParam::n,
+		PBDSystemParam::h,
+		PBDSystemParam::r,
+		1.0f,
+		PBDSystemParam::m,
+		PBDSystemParam::a,
+		PBDSystemParam::g
+	);
+
+	mass_spring_system* temp = builder.getResult();
+	g_pbdSystem = buildPBDSystem(*temp);
+	delete temp;
+	g_pbdSolver = new PBDSolver(g_pbdSystem, g_clothMesh->vbuff());
+	if (g_selfCollisionThicknessOverride > 0.0f) {
+		g_pbdSolver->setSelfCollisionThickness(g_selfCollisionThicknessOverride);
+	}
+
+	// Stretch and shear are distance-constraint stiffness controls.
+	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), stretch);
+	g_pbdSolver->addShearConstraints(builder.getShearIndex(), shear);
+	// Bend controls dihedral bending stiffness.
+	g_pbdSolver->addBendConstraints(builder.getBendIndex(), bend);
+	// Damping controls velocity energy decay without changing gravity.
+	g_pbdSolver->setDampingFactor(damping);
+	g_pbdSolver->setSolverIterations(iterations);
+	g_pbdSolver->pinPoint(0);
+	g_pbdSolver->pinPoint(n - 1);
+	g_pbdFrameCounter = 0u;
+	initMouseInteraction(g_pbdSolver, n);
+
+	if (captureDefaults || !g_pbdHangRuntime.initialized) {
+		g_pbdHangRuntime.defaultStretch = g_pbdSolver->getStructuralStiffness();
+		g_pbdHangRuntime.defaultShear = g_pbdSolver->getShearStiffness();
+		g_pbdHangRuntime.defaultBend = g_pbdSolver->getBendStiffness();
+		g_pbdHangRuntime.defaultDamping = g_pbdSolver->getDampingFactor();
+		g_pbdHangRuntime.initialPositions.assign(
+			g_clothMesh->vbuff(),
+			g_clothMesh->vbuff() + g_clothMesh->vbuffLen()
+		);
+		g_pbdHangRuntime.initialized = true;
+	}
+}
+
+static void resetPBDHangDemo(bool resetParameters) {
+	if (g_mode != SimMode::PBDHang || g_clothMesh == nullptr || !g_pbdHangRuntime.initialized) return;
+
+	const float stretch = resetParameters
+		? g_pbdHangRuntime.defaultStretch
+		: g_pbdSolver->getStructuralStiffness();
+	const float shear = resetParameters
+		? g_pbdHangRuntime.defaultShear
+		: g_pbdSolver->getShearStiffness();
+	const float bend = resetParameters
+		? g_pbdHangRuntime.defaultBend
+		: g_pbdSolver->getBendStiffness();
+	const float damping = resetParameters
+		? g_pbdHangRuntime.defaultDamping
+		: g_pbdSolver->getDampingFactor();
+	const unsigned int iterations = (g_pbdSolver != nullptr)
+		? g_pbdSolver->getSolverIterations()
+		: ((g_pbdHangIterationsOverride > 0u) ? g_pbdHangIterationsOverride : static_cast<unsigned int>(PBDSystemParam::n_iter));
+
+	if (UI != nullptr) {
+		UI->releasePoint();
+	}
+	g_mouseClickDown = false;
+	g_mouseLClickButton = false;
+	g_mouseRClickButton = false;
+	g_mouseMClickButton = false;
+
+	std::copy(
+		g_pbdHangRuntime.initialPositions.begin(),
+		g_pbdHangRuntime.initialPositions.end(),
+		g_clothMesh->vbuff()
+	);
+	g_clothMesh->request_face_normals();
+	g_clothMesh->update_normals();
+	g_clothMesh->release_face_normals();
+	updateRenderTarget();
+
+	configurePBDHangSolver(stretch, shear, bend, damping, iterations, false);
+	logPBDHangControlState(resetParameters ? "reset-parameters" : "reset-cloth");
+	glutPostRedisplay();
+}
+
+static void logPBDHangControlState(const std::string& reason) {
+	if (g_mode != SimMode::PBDHang || g_pbdSolver == nullptr) return;
+	std::cout
+		<< "[pbd hang controls] " << reason
+		<< " stretch=" << g_pbdSolver->getStructuralStiffness()
+		<< ", shear=" << g_pbdSolver->getShearStiffness()
+		<< ", bend=" << g_pbdSolver->getBendStiffness()
+		<< ", damping=" << g_pbdSolver->getDampingFactor()
+		<< ", iters=" << g_pbdSolver->getSolverIterations()
+		<< (g_pbdHangRuntime.paused ? ", paused" : ", running")
+		<< std::endl;
 }
 
 static pbd_system* buildPBDSystem(const mass_spring_system& system) {
@@ -981,33 +1177,18 @@ static void demo_drop() {
 }
 
 static void demo_pbd_hang() {
-	const unsigned int n = PBDSystemParam::n;
-
-	MassSpringBuilder builder;
-	builder.uniformGrid(
-		PBDSystemParam::n,
-		PBDSystemParam::h,
-		PBDSystemParam::r,
-		1.0f,
-		PBDSystemParam::m,
-		PBDSystemParam::a,
-		PBDSystemParam::g
+	const unsigned int iterations = (g_pbdHangIterationsOverride > 0u)
+		? g_pbdHangIterationsOverride
+		: static_cast<unsigned int>(PBDSystemParam::n_iter);
+	configurePBDHangSolver(
+		PBDSystemParam::k_stretch,
+		PBDSystemParam::k_shear,
+		PBDSystemParam::k_bend,
+		PBDHangControlParam::defaultDamping,
+		iterations,
+		true
 	);
-
-	// build PBD system from mass-spring system, then initialize PBD solver and constraints
-	mass_spring_system* temp = builder.getResult();
-	g_pbdSystem = buildPBDSystem(*temp);
-	delete temp;
-	g_pbdSolver = new PBDSolver(g_pbdSystem, g_clothMesh->vbuff());
-	if (g_selfCollisionThicknessOverride > 0.0f) {
-		g_pbdSolver->setSelfCollisionThickness(g_selfCollisionThicknessOverride);
-	}
-	g_pbdSolver->addStructuralConstraints(builder.getStructIndex(), PBDSystemParam::k_stretch);
-	g_pbdSolver->addShearConstraints(builder.getShearIndex(), PBDSystemParam::k_shear);
-	g_pbdSolver->addBendConstraints(builder.getBendIndex(), PBDSystemParam::k_bend);
-	g_pbdSolver->pinPoint(0);
-	g_pbdSolver->pinPoint(n - 1);
-	initMouseInteraction(g_pbdSolver, n);
+	logPBDHangControlState("startup");
 }
 
 static void demo_pbd_hang_wind() {
@@ -1238,6 +1419,7 @@ static void display() {
 		renderer.draw();
 	}
 	drawCloth();
+	drawPBDHangOverlay();
 	glutSwapBuffers();
 
 	checkGlErrors();
@@ -1248,6 +1430,90 @@ static void reshape(int w, int h) {
 	g_windowHeight = h;
 	glViewport(0, 0, w, h);
 	updateProjection();
+	glutPostRedisplay();
+}
+
+static void keyboard(unsigned char key, int, int) {
+	if (g_mode != SimMode::PBDHang || g_pbdSolver == nullptr) return;
+
+	switch (key) {
+	case '1':
+		// Stretch is a distance-constraint stiffness control.
+		g_pbdSolver->setStructuralStiffness(std::max(
+			PBDHangControlParam::stretchMin,
+			g_pbdSolver->getStructuralStiffness() - PBDHangControlParam::stretchStep
+		));
+		logPBDHangControlState("stretch-");
+		break;
+	case '2':
+		g_pbdSolver->setStructuralStiffness(std::min(
+			PBDHangControlParam::stretchMax,
+			g_pbdSolver->getStructuralStiffness() + PBDHangControlParam::stretchStep
+		));
+		logPBDHangControlState("stretch+");
+		break;
+	case '3':
+		// Shear is also a distance-constraint stiffness control.
+		g_pbdSolver->setShearStiffness(std::max(
+			PBDHangControlParam::shearMin,
+			g_pbdSolver->getShearStiffness() - PBDHangControlParam::shearStep
+		));
+		logPBDHangControlState("shear-");
+		break;
+	case '4':
+		g_pbdSolver->setShearStiffness(std::min(
+			PBDHangControlParam::shearMax,
+			g_pbdSolver->getShearStiffness() + PBDHangControlParam::shearStep
+		));
+		logPBDHangControlState("shear+");
+		break;
+	case '5':
+		// Bend controls dihedral bending stiffness.
+		g_pbdSolver->setBendStiffness(std::max(
+			PBDHangControlParam::bendMin,
+			g_pbdSolver->getBendStiffness() - PBDHangControlParam::bendStep
+		));
+		logPBDHangControlState("bend-");
+		break;
+	case '6':
+		g_pbdSolver->setBendStiffness(std::min(
+			PBDHangControlParam::bendMax,
+			g_pbdSolver->getBendStiffness() + PBDHangControlParam::bendStep
+		));
+		logPBDHangControlState("bend+");
+		break;
+	case '7':
+		// Damping controls velocity energy decay and keeps gravity unchanged.
+		g_pbdSolver->setDampingFactor(std::max(
+			PBDHangControlParam::dampingMin,
+			g_pbdSolver->getDampingFactor() - PBDHangControlParam::dampingStep
+		));
+		logPBDHangControlState("damping-");
+		break;
+	case '8':
+		g_pbdSolver->setDampingFactor(std::min(
+			PBDHangControlParam::dampingMax,
+			g_pbdSolver->getDampingFactor() + PBDHangControlParam::dampingStep
+		));
+		logPBDHangControlState("damping+");
+		break;
+	case 'r':
+	case 'R':
+		resetPBDHangDemo(false);
+		break;
+	case 't':
+	case 'T':
+		resetPBDHangDemo(true);
+		break;
+	case 'p':
+	case 'P':
+		g_pbdHangRuntime.paused = !g_pbdHangRuntime.paused;
+		logPBDHangControlState(g_pbdHangRuntime.paused ? "pause" : "resume");
+		break;
+	default:
+		return;
+	}
+
 	glutPostRedisplay();
 }
 
@@ -1359,15 +1625,65 @@ static void drawCloth() {
 	renderer.draw();
 }
 
+static void drawBitmapText(float x, float y, const std::string& text) {
+	glRasterPos2f(x, y);
+	for (char c : text) {
+		glutBitmapCharacter(GLUT_BITMAP_8_BY_13, c);
+	}
+}
+
+static void drawPBDHangOverlay() {
+	if (g_mode != SimMode::PBDHang || g_pbdSolver == nullptr) return;
+
+	const GLboolean depthEnabled = glIsEnabled(GL_DEPTH_TEST);
+	glDisable(GL_DEPTH_TEST);
+
+	glMatrixMode(GL_PROJECTION);
+	glPushMatrix();
+	glLoadIdentity();
+	gluOrtho2D(0.0, static_cast<double>(g_windowWidth), 0.0, static_cast<double>(g_windowHeight));
+
+	glMatrixMode(GL_MODELVIEW);
+	glPushMatrix();
+	glLoadIdentity();
+	glColor3f(1.0f, 1.0f, 1.0f);
+
+	std::ostringstream valueLine;
+	valueLine << std::fixed << std::setprecision(3)
+		<< "stretch=" << g_pbdSolver->getStructuralStiffness()
+		<< "  shear=" << g_pbdSolver->getShearStiffness()
+		<< "  bend=" << g_pbdSolver->getBendStiffness()
+		<< "  damping=" << g_pbdSolver->getDampingFactor();
+
+	std::ostringstream iterLine;
+	iterLine << "iters=" << g_pbdSolver->getSolverIterations()
+		<< "  state=" << (g_pbdHangRuntime.paused ? "paused" : "running");
+
+	drawBitmapText(16.0f, g_windowHeight - 22.0f, "PBD hang tuning: 1/2 stretch  3/4 shear  5/6 bend  7/8 damping  R reset cloth  T reset params  P pause");
+	drawBitmapText(16.0f, g_windowHeight - 40.0f, valueLine.str());
+	drawBitmapText(16.0f, g_windowHeight - 58.0f, iterLine.str());
+
+	glPopMatrix();
+	glMatrixMode(GL_PROJECTION);
+	glPopMatrix();
+	glMatrixMode(GL_MODELVIEW);
+
+	if (depthEnabled) {
+		glEnable(GL_DEPTH_TEST);
+	}
+}
+
 static void animateCloth(int value) {
 	if (isPBDMode()) {
-		const unsigned int iterationCount = isFloorDemo()
-			? g_pbdSolver->getSolverIterations()
-			: static_cast<unsigned int>(PBDSystemParam::n_iter);
-		g_pbdSolver->solve(iterationCount);
-		++g_pbdFrameCounter;
-		if (g_enableDebugDiagnostics) {
-			logPBDSelfCollisionDiagnostics();
+		if (!(g_mode == SimMode::PBDHang && g_pbdHangRuntime.paused)) {
+			const unsigned int iterationCount = (isFloorDemo() || g_mode == SimMode::PBDHang)
+				? g_pbdSolver->getSolverIterations()
+				: static_cast<unsigned int>(PBDSystemParam::n_iter);
+			g_pbdSolver->solve(iterationCount);
+			++g_pbdFrameCounter;
+			if (g_enableDebugDiagnostics) {
+				logPBDSelfCollisionDiagnostics();
+			}
 		}
 	}
 	else {

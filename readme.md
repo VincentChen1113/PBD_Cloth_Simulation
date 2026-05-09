@@ -10,38 +10,25 @@ This project was originally forked from [sam007961/FastMassSpring](https://githu
 
 ## Project Summary
 
-This project extends a C++ OpenGL implementation of **Fast Simulation of Mass-Spring Systems** [1] by adding a new **Position-Based Dynamics (PBD)** cloth solver based on Müller et al. [3].
+This project is a C++ OpenGL cloth-simulation application built on top of the original **Fast Simulation of Mass-Spring Systems** codebase [1] and extended with a separate **Position-Based Dynamics (PBD)** solver based on Müller et al. [3]. It keeps the original mass-spring implementation for baseline comparison while adding a broader set of cloth behaviors and interaction-focused PBD demos.
 
-The original fast mass-spring solver is preserved for comparison, while the new PBD solver is implemented as a separate solver using the existing rendering, mesh, shader, and interaction infrastructure.
+The current program includes both the original mass-spring hanging and sphere-drop scenes and a set of PBD demos for hanging cloth, sphere drop, floor drop with self-collision, dual-obstacle draping over a sphere and cube, and a flag-style wind scene. The PBD path supports fixed-point, stretch, shear, and bending constraints; sphere, floor, and analytic box collision; vertex-triangle self-collision with optional diagnostics; and interactive runtime controls for parameters such as stiffness, damping, timestep, mesh resolution, obstacle size, and wind direction/speed.
 
-The project currently includes:
-
-- the original fast mass-spring hanging and sphere-drop demos
-- a separate PBD cloth solver
-- constraint-based stretch, shear, bend, and fixed-point handling
-- sphere, plane/floor, and box obstacle collision
-- vertex-triangle self-collision with diagnostics
-- floor-drop and dual-obstacle stress demos
-- a flag-style wind demo using aerodynamic drag, lift, gusts, and procedural noise
-- an interactive runtime tuning interface for the PBD hanging demo
+The project uses the shared rendering, mesh, shader, and picking infrastructure from the original application, so both solvers can be launched from the same executable and compared through a common visual interface.
 
 ---
 
 ## Key Features
 
-- Original **fast mass-spring** solver preserved for comparison
-- New **Position-Based Dynamics** solver
-- Fixed-point constraints for pinned/dragged particles
-- Structural and shear distance constraints
-- Dihedral-angle bending constraints
-- Iteration-corrected stiffness handling
-- Sphere collision
-- Plane/floor collision
-- Analytic box collision with edge-midpoint obstacle sampling
-- Vertex-triangle self-collision with debug counters
-- Dedicated floor-drop and dual-obstacle scenes
-- Flag-style wind demo with drag, lift, gust modulation, and procedural flutter noise
-- Runtime tuning interface for the PBD hanging cloth demo
+- Original **fast mass-spring** solver preserved for side-by-side comparison
+- Separate **Position-Based Dynamics** cloth solver integrated into the same executable
+- Fixed-point, stretch, shear, and dihedral bending constraints
+- Iteration-corrected stiffness handling for more consistent tuning across solver iteration counts
+- Sphere, floor, and analytic box collision handling
+- Vertex-triangle self-collision with optional debug diagnostics
+- Dedicated PBD hang, sphere-drop, floor-drop, dual-obstacle, and wind demos
+- Runtime controls for stiffness, damping, timestep, mesh resolution, obstacle size, and wind settings
+- Shared rendering, shader, mesh, and picking infrastructure across both solver modes
 
 ---
 
@@ -310,7 +297,7 @@ The `pbd hang-wind` demo configures the cloth like a flag:
 
 Startup options:
 
-- `--wind-speed value`: required for `pbd hang-wind`; accepts a float in `[0, 15]`
+- `--wind-speed value`: optional startup wind speed for `pbd hang-wind`; accepts a float in `[0, 15]`
 - `--wind-dir x y z`: optional startup wind direction; defaults to `(1, 0, 0)` and is normalized internally
 
 Keyboard controls:
@@ -415,32 +402,14 @@ This is a lightweight approximation inspired by the aerodynamic force model in K
 
 ## Demo Notes
 
-### Fast Mass-Spring System
+The demo gallery above shows the current PBD scenes included in this project. For baseline reference, the original forked mass-spring implementation is still available and remains useful for qualitative comparison against the newer PBD demos.
 
-The original solver from the forked repository is based on Liu et al. [1]. It is preserved for comparison with the PBD solver.
+### Fast Mass-Spring Reference
+
+The original solver from the forked repository is based on Liu et al. [1]. It is preserved here as the baseline solver mode.
 
 ![curtain_hang](https://user-images.githubusercontent.com/24758349/79005907-97ad1100-7b60-11ea-9e27-90375461beaf.gif)  
 ![curtain_ball](https://user-images.githubusercontent.com/24758349/79005924-9d0a5b80-7b60-11ea-8ce4-d9fc683441d7.gif)
-
-### PBD Hang
-
-Demonstrates pinned cloth behavior, constraint stiffness tuning, damping, and mouse interaction.
-
-### PBD Drop
-
-Demonstrates cloth collision against a smooth sphere obstacle.
-
-### PBD Drop-Floor
-
-Demonstrates plane collision, friction, floor contact, and self-collision behavior under dense folded contact.
-
-### PBD Drop-Floor-Dual
-
-Demonstrates interaction with multiple static obstacles, including a sphere and an analytic box/cube.
-
-### PBD Hang-Wind
-
-Demonstrates flag-like cloth motion under aerodynamic drag, lift, gust, and procedural noise.
 
 ---
 
@@ -468,7 +437,7 @@ Demonstrates flag-like cloth motion under aerodynamic drag, lift, gust, and proc
 - [x] Implement shear constraints
 - [x] Implement dihedral bend constraints
 - [x] Add stiffness / iteration-corrected stiffness handling
-- [x] Add runtime parameter controls for PBD hang demo
+- [x] Add runtime parameter controls across the PBD demo set
 
 ### Collision Handling
 
@@ -504,13 +473,13 @@ Demonstrates flag-like cloth motion under aerodynamic drag, lift, gust, and proc
 - [ ] Implement full mesh collision
 - [ ] Implement full edge-edge cloth self-collision
 - [ ] Benchmark performance
-- [ ] Record comparison demos / metrics
+- [ ] Collect additional comparison metrics
 
 ### Final Deliverables
 
 - [x] Stable PBD cloth demos
 - [x] Updated README / documentation
-- [X] Demo video / GIF
+- [x] Demo gallery / GIFs
 - [ ] Final report / slides / citations
 
 ---
@@ -523,7 +492,6 @@ Demonstrates flag-like cloth motion under aerodynamic drag, lift, gust, and proc
 - Edge-midpoint sampling improves obstacle collision near sharp edges but is still an approximation.
 - Wind is modeled as an external aerodynamic force, not a full Navier-Stokes or particle-tracing wind field.
 - Quantitative performance benchmarking is not yet complete.
-- Demo videos/GIFs are future deliverables.
 
 ---
 

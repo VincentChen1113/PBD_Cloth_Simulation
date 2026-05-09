@@ -510,7 +510,7 @@ Demonstrates flag-like cloth motion under aerodynamic drag, lift, gust, and proc
 
 - [x] Stable PBD cloth demos
 - [x] Updated README / documentation
-- [ ] Demo video / GIF
+- [X] Demo video / GIF
 - [ ] Final report / slides / citations
 
 ---

@@ -199,6 +199,9 @@ Backup*/
 UpgradeLog*.XML
 UpgradeLog*.htm
 
+# Project report files
+CSE328_Final_Report___Position_Based_Dynamic.pdf
+
 # SQL Server files
 *.mdf
 *.ldf
